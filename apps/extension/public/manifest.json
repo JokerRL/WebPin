@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "UI Annotations",
+  "version": "0.1.0",
+  "description": "Annotate web prototypes and generate AI task packages.",
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
+  "host_permissions": ["http://127.0.0.1:48731/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "UI Annotations"
+  },
+  "commands": {
+    "toggle-select-mode": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "MacCtrl+Shift+Y"
+      },
+      "description": "Select a page element for annotation"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "chrome-ui-annotation-ai-task",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm --filter @ui-annotations/shared build && pnpm -r typecheck",
+    "dev:bridge": "pnpm --filter @ui-annotations/bridge dev",
+    "dev:extension": "pnpm --filter @ui-annotations/extension dev",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

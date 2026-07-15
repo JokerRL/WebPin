@@ -1,0 +1,19 @@
+{
+  "name": "@ui-annotations/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "test": "vitest run && pnpm run build && node scripts/runtime-smoke.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  }
+}
