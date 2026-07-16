@@ -1,4 +1,5 @@
-import { appendFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { annotationSchema, createTaskPackage, type Annotation } from "@ui-annotations/shared";
@@ -44,15 +45,97 @@ export type AgentRun = {
   promptPath: string;
 };
 
+const noFollowFlag = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+const managedFileMode = 0o600;
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function managedFileTargetError(): Error {
+  return new Error("managed annotation file must be a regular file");
+}
+
+async function rejectUnsupportedFinalTarget(filePath: string): Promise<void> {
+  if (noFollowFlag !== 0) {
+    return;
+  }
+
+  // Compatibility defense for platforms without O_NOFOLLOW. This rejects a
+  // final-component link observed here, but cannot protect against a hostile
+  // process swapping that component between lstat and open.
+  try {
+    const stats = await lstat(filePath);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw managedFileTargetError();
+    }
+  } catch (error) {
+    if (!isFileSystemError(error, "ENOENT")) {
+      throw error;
+    }
+  }
+}
+
+async function withManagedRegularFile<T>(
+  filePath: string,
+  flags: number,
+  operation: (handle: FileHandle) => Promise<T>
+): Promise<T> {
+  await rejectUnsupportedFinalTarget(filePath);
+
+  let handle: FileHandle;
+  try {
+    handle = await open(filePath, flags | noFollowFlag, managedFileMode);
+  } catch (error) {
+    if (isFileSystemError(error, "ELOOP")) {
+      throw managedFileTargetError();
+    }
+    throw error;
+  }
+
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw managedFileTargetError();
+    }
+    return await operation(handle);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readManagedFile(filePath: string): Promise<string> {
+  return withManagedRegularFile(filePath, constants.O_RDONLY, (handle) => handle.readFile("utf8"));
+}
+
+async function writeManagedFile(filePath: string, contents: string | Uint8Array): Promise<void> {
+  await withManagedRegularFile(
+    filePath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC,
+    async (handle) => {
+      await handle.writeFile(contents);
+    }
+  );
+}
+
+async function appendManagedFile(filePath: string, contents: string): Promise<void> {
+  await withManagedRegularFile(
+    filePath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
+    async (handle) => {
+      await handle.appendFile(contents, "utf8");
+    }
+  );
+}
+
 async function readJsonLines(filePath: string): Promise<unknown[]> {
   try {
-    const contents = await readFile(filePath, "utf8");
+    const contents = await readManagedFile(filePath);
     return contents
       .split("\n")
       .filter((line) => line.trim().length > 0)
       .map((line) => JSON.parse(line));
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (isFileSystemError(error, "ENOENT")) {
       return [];
     }
     throw error;
@@ -125,9 +208,9 @@ async function ensureManagedDirectory(path: string): Promise<void> {
 export async function readProjectSettings(projectPath: string): Promise<ProjectSettings> {
   await ensureAnnotationDirs(projectPath);
   try {
-    return projectSettingsSchema.parse(JSON.parse(await readFile(join(annotationRoot(projectPath), "project.json"), "utf8")));
+    return projectSettingsSchema.parse(JSON.parse(await readManagedFile(join(annotationRoot(projectPath), "project.json"))));
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (isFileSystemError(error, "ENOENT")) {
       return projectSettingsSchema.parse({});
     }
     throw error;
@@ -140,11 +223,10 @@ export async function updateProjectSettings(
 ): Promise<ProjectSettings> {
   const current = await readProjectSettings(projectPath);
   const settings = projectSettingsSchema.parse({ ...current, ...patch });
-  await writeFile(join(annotationRoot(projectPath), "project.json"), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-  await appendFile(
+  await writeManagedFile(join(annotationRoot(projectPath), "project.json"), `${JSON.stringify(settings, null, 2)}\n`);
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
-    `${JSON.stringify({ type: "project-settings.updated", at: new Date().toISOString(), patch })}\n`,
-    "utf8"
+    `${JSON.stringify({ type: "project-settings.updated", at: new Date().toISOString(), patch })}\n`
   );
   return settings;
 }
@@ -159,8 +241,8 @@ export async function writeAnnotationAsset(projectPath: string, rawInput: Annota
   const assetPath = assertInside(annotationRoot(projectPath), join(annotationRoot(projectPath), relativePath));
   const base64 = input.dataUrl.slice(input.dataUrl.indexOf(",") + 1);
 
-  await writeFile(assetPath, Buffer.from(base64, "base64"));
-  await appendFile(
+  await writeManagedFile(assetPath, Buffer.from(base64, "base64"));
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
     `${JSON.stringify({
       type: "annotation-asset.written",
@@ -168,8 +250,7 @@ export async function writeAnnotationAsset(projectPath: string, rawInput: Annota
       kind: input.kind,
       path: relativePath,
       at: new Date().toISOString()
-    })}\n`,
-    "utf8"
+    })}\n`
   );
   return relativePath;
 }
@@ -177,11 +258,10 @@ export async function writeAnnotationAsset(projectPath: string, rawInput: Annota
 export async function appendAnnotation(projectPath: string, rawAnnotation: unknown): Promise<Annotation> {
   const annotation = annotationSchema.parse(rawAnnotation);
   await ensureAnnotationDirs(projectPath);
-  await appendFile(join(annotationRoot(projectPath), "annotations.jsonl"), `${JSON.stringify(annotation)}\n`, "utf8");
-  await appendFile(
+  await appendManagedFile(join(annotationRoot(projectPath), "annotations.jsonl"), `${JSON.stringify(annotation)}\n`);
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
-    `${JSON.stringify({ type: "annotation.created", annotationId: annotation.id, at: annotation.createdAt })}\n`,
-    "utf8"
+    `${JSON.stringify({ type: "annotation.created", annotationId: annotation.id, at: annotation.createdAt })}\n`
   );
   return annotation;
 }
@@ -231,11 +311,10 @@ export async function updateAnnotation(
     updatedAt: new Date().toISOString()
   });
 
-  await appendFile(join(annotationRoot(projectPath), "annotations.jsonl"), `${JSON.stringify(updated)}\n`, "utf8");
-  await appendFile(
+  await appendManagedFile(join(annotationRoot(projectPath), "annotations.jsonl"), `${JSON.stringify(updated)}\n`);
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
-    `${JSON.stringify({ type: "annotation.updated", annotationId: updated.id, at: updated.updatedAt })}\n`,
-    "utf8"
+    `${JSON.stringify({ type: "annotation.updated", annotationId: updated.id, at: updated.updatedAt })}\n`
   );
   return updated;
 }
@@ -246,10 +325,9 @@ export async function deleteAnnotation(projectPath: string, annotationId: string
     throw new Error("annotation not found");
   }
 
-  await appendFile(
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
-    `${JSON.stringify({ type: "annotation.deleted", annotationId, at: new Date().toISOString() })}\n`,
-    "utf8"
+    `${JSON.stringify({ type: "annotation.deleted", annotationId, at: new Date().toISOString() })}\n`
   );
 }
 
@@ -299,8 +377,8 @@ export async function createTaskFiles(
   const markdownPath = assertInside(taskRoot, join(taskRoot, `${taskSlug}.md`));
   const promptPath = assertInside(taskRoot, join(taskRoot, `${taskSlug}.prompt.md`));
 
-  await writeFile(jsonPath, `${JSON.stringify(taskPackage, null, 2)}\n`, "utf8");
-  await writeFile(
+  await writeManagedFile(jsonPath, `${JSON.stringify(taskPackage, null, 2)}\n`);
+  await writeManagedFile(
     markdownPath,
     [
       `# ${input.taskId}`,
@@ -340,11 +418,10 @@ export async function createTaskFiles(
       "- Keep implementation changes limited to the annotated behavior.",
       "- Run the smallest relevant verification command before reporting completion.",
       ""
-    ].join("\n"),
-    "utf8"
+    ].join("\n")
   );
 
-  await writeFile(
+  await writeManagedFile(
     promptPath,
     [
       `Read .ui-annotations/tasks/${taskSlug}.md and .ui-annotations/tasks/${taskSlug}.json.`,
@@ -357,8 +434,7 @@ export async function createTaskFiles(
       "Do not modify unrelated files.",
       "After implementation, summarize changed files and verification results.",
       ""
-    ].join("\n"),
-    "utf8"
+    ].join("\n")
   );
 
   return { jsonPath, markdownPath, promptPath };
@@ -373,11 +449,10 @@ export async function writeAgentRun(projectPath: string, run: AgentRun): Promise
 
   const runsRoot = join(annotationRoot(projectPath), "runs");
   const runPath = assertInside(runsRoot, join(runsRoot, `${run.runId}.json`));
-  await writeFile(runPath, `${JSON.stringify(run, null, 2)}\n`, "utf8");
-  await appendFile(
+  await writeManagedFile(runPath, `${JSON.stringify(run, null, 2)}\n`);
+  await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
-    `${JSON.stringify({ type: "agent-run.recorded", runId: run.runId, taskId: run.taskId, at: run.finishedAt })}\n`,
-    "utf8"
+    `${JSON.stringify({ type: "agent-run.recorded", runId: run.runId, taskId: run.taskId, at: run.finishedAt })}\n`
   );
   return run;
 }
@@ -389,7 +464,7 @@ export async function readAgentRun(projectPath: string, runId: string): Promise<
   }
   const runsRoot = join(annotationRoot(projectPath), "runs");
   const runPath = assertInside(runsRoot, join(runsRoot, `${runId}.json`));
-  return JSON.parse(await readFile(runPath, "utf8")) as AgentRun;
+  return JSON.parse(await readManagedFile(runPath)) as AgentRun;
 }
 
 export async function readTaskPrompt(projectPath: string, taskId: string): Promise<{ prompt: string; promptPath: string }> {
@@ -398,7 +473,7 @@ export async function readTaskPrompt(projectPath: string, taskId: string): Promi
   const taskRoot = join(annotationRoot(projectPath), "tasks");
   const promptPath = assertInside(taskRoot, join(taskRoot, `${taskSlug}.prompt.md`));
   return {
-    prompt: await readFile(promptPath, "utf8"),
+    prompt: await readManagedFile(promptPath),
     promptPath: relative(projectPath, promptPath)
   };
 }

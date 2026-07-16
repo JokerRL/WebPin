@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
   listAnnotations,
   readAgentRun,
   readProjectSettings,
+  readTaskPrompt,
   updateProjectSettings,
   updateAnnotation,
   writeAnnotationAsset,
@@ -44,6 +45,34 @@ const annotation = {
   updatedAt: "2026-07-01T00:00:00.000Z"
 } as const;
 
+const agentRun = {
+  runId: "run_task_001_20260702T120000000Z",
+  taskId: "task_001",
+  agent: "codex",
+  status: "completed",
+  command: ["codex", "exec", "--sandbox", "workspace-write", "Read task."],
+  startedAt: "2026-07-02T12:00:00.000Z",
+  finishedAt: "2026-07-02T12:01:00.000Z",
+  exitCode: 0,
+  stdout: "Done",
+  stderr: "",
+  promptPath: ".ui-annotations/tasks/task_001.prompt.md"
+} as const;
+
+const taskInput = {
+  taskId: "task_001",
+  annotations: [annotation],
+  userIntent: "Align save button.",
+  acceptanceCriteria: ["Button height matches controls."]
+};
+
+async function createOutsideFile(contents = "outside-content"): Promise<{ path: string; contents: string }> {
+  const outsideDirectory = await mkdtemp(join(tmpdir(), "ui-annotations-outside-"));
+  const path = join(outsideDirectory, "outside.txt");
+  await writeFile(path, contents, "utf8");
+  return { path, contents };
+}
+
 describe("store", () => {
   it("supports concurrent annotation directory initialization", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
@@ -75,6 +104,91 @@ describe("store", () => {
     await expect(ensureAnnotationDirs(projectPath)).rejects.toThrow(
       "managed annotation directory must not be a symbolic link"
     );
+  });
+
+  it.each([
+    {
+      name: "annotations.jsonl",
+      filename: "annotations.jsonl",
+      operation: (projectPath: string) => appendAnnotation(projectPath, annotation)
+    },
+    {
+      name: "events.jsonl",
+      filename: "events.jsonl",
+      operation: (projectPath: string) => appendAnnotation(projectPath, annotation)
+    },
+    {
+      name: "project.json",
+      filename: "project.json",
+      operation: (projectPath: string) => updateProjectSettings(projectPath, { screenshotCaptureEnabled: true })
+    }
+  ])("rejects a symbolic-link root managed file: $name", async ({ filename, operation }) => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outside = await createOutsideFile(filename === "project.json" ? "{}" : "outside-content");
+    await ensureAnnotationDirs(projectPath);
+    await symlink(outside.path, join(projectPath, ".ui-annotations", filename));
+
+    await expect(operation(projectPath)).rejects.toThrow();
+    await expect(readFile(outside.path, "utf8")).resolves.toBe(outside.contents);
+  });
+
+  it.each(["json", "md", "prompt.md"])(
+    "rejects a symbolic-link task %s output",
+    async (extension) => {
+      const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+      const outside = await createOutsideFile();
+      await ensureAnnotationDirs(projectPath);
+      await symlink(outside.path, join(projectPath, ".ui-annotations", "tasks", `task_001.${extension}`));
+
+      await expect(createTaskFiles(projectPath, taskInput)).rejects.toThrow();
+      await expect(readFile(outside.path, "utf8")).resolves.toBe(outside.contents);
+    }
+  );
+
+  it("rejects a symbolic-link asset output filename", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outside = await createOutsideFile();
+    await ensureAnnotationDirs(projectPath);
+    await symlink(outside.path, join(projectPath, ".ui-annotations", "assets", "screenshots", "ann_001.png"));
+
+    await expect(
+      writeAnnotationAsset(projectPath, {
+        annotationId: "ann_001",
+        kind: "screenshot",
+        dataUrl: "data:image/png;base64,aGVsbG8="
+      })
+    ).rejects.toThrow();
+    await expect(readFile(outside.path, "utf8")).resolves.toBe(outside.contents);
+  });
+
+  it("rejects a symbolic-link run record filename", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outside = await createOutsideFile();
+    await ensureAnnotationDirs(projectPath);
+    await symlink(
+      outside.path,
+      join(projectPath, ".ui-annotations", "runs", "run_task_001_20260702T120000000Z.json")
+    );
+
+    await expect(writeAgentRun(projectPath, agentRun)).rejects.toThrow();
+    await expect(readFile(outside.path, "utf8")).resolves.toBe(outside.contents);
+  });
+
+  it("rejects a symbolic-link task prompt read without returning outside content", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outside = await createOutsideFile("outside prompt");
+    await ensureAnnotationDirs(projectPath);
+    await symlink(outside.path, join(projectPath, ".ui-annotations", "tasks", "task_001.prompt.md"));
+
+    await expect(readTaskPrompt(projectPath, "task_001")).rejects.toThrow();
+  });
+
+  it("rejects a non-regular final managed file target", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    await ensureAnnotationDirs(projectPath);
+    await mkdir(join(projectPath, ".ui-annotations", "project.json"));
+
+    await expect(readProjectSettings(projectPath)).rejects.toThrow();
   });
 
   it("appends validated annotations as jsonl", async () => {
@@ -144,19 +258,7 @@ describe("store", () => {
 
   it("writes and reads agent run records", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
-    await writeAgentRun(projectPath, {
-      runId: "run_task_001_20260702T120000000Z",
-      taskId: "task_001",
-      agent: "codex",
-      status: "completed",
-      command: ["codex", "exec", "--sandbox", "workspace-write", "Read task."],
-      startedAt: "2026-07-02T12:00:00.000Z",
-      finishedAt: "2026-07-02T12:01:00.000Z",
-      exitCode: 0,
-      stdout: "Done",
-      stderr: "",
-      promptPath: ".ui-annotations/tasks/task_001.prompt.md"
-    });
+    await writeAgentRun(projectPath, agentRun);
 
     const run = await readAgentRun(projectPath, "run_task_001_20260702T120000000Z");
 
