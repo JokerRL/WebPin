@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { createBridgeRequestHandler } from "./server.js";
+import { appendAnnotation } from "./store.js";
 
 const accessKey = "server-test-key";
 const authorizedHeaders = {
@@ -230,6 +231,18 @@ describe("bridge server", () => {
     expect(events).not.toContain(accessKey);
   });
 
+  it("returns the current project identity for legacy saved annotations", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, { ...annotation, projectId: "legacy-basename" });
+
+    const response = await dispatch({ projectPath, method: "GET", url: "/annotations" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json.annotations).toEqual([
+      expect.objectContaining({ id: "ann_001", projectId: "project_server_test" })
+    ]);
+  });
+
   it("rejects a mismatched annotation identity before writing annotation or event files", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
     const response = await dispatch({
@@ -325,8 +338,33 @@ describe("bridge server", () => {
     expect(listResponse.json.annotations).toEqual([]);
   });
 
+  it("migrates a legacy annotation identity when it is updated", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, { ...annotation, projectId: "legacy-basename" });
+
+    const response = await dispatch({
+      projectPath,
+      method: "PATCH",
+      url: "/annotations/ann_001",
+      body: JSON.stringify({ patch: { status: "resolved" } })
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json.annotation).toMatchObject({
+      id: "ann_001",
+      projectId: "project_server_test",
+      status: "resolved"
+    });
+    const history = (await readFile(join(projectPath, ".ui-annotations", "annotations.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(history.at(-1)).toMatchObject({ projectId: "project_server_test", status: "resolved" });
+  });
+
   it("creates task files and returns only project-relative paths", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, annotation);
     const response = await dispatch({
       projectPath,
       method: "POST",
@@ -348,24 +386,121 @@ describe("bridge server", () => {
     expect(JSON.stringify(response.json)).not.toContain(projectPath);
   });
 
-  it("rejects mismatched task source identities before creating task files", async () => {
+  it("creates tasks from trusted saved annotations instead of submitted annotation content", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, { ...annotation, projectId: "legacy-basename" });
     const response = await dispatch({
       projectPath,
       method: "POST",
       url: "/tasks",
       body: JSON.stringify({
-        taskId: "task_mismatch",
-        annotations: [{ ...annotation, projectId: "project_other" }],
+        taskId: "task_trusted",
+        annotations: [{
+          ...annotation,
+          projectId: "project_other",
+          note: "Tampered note",
+          targetPlatforms: ["web"],
+          anchor: {
+            dom: { selector: "#tampered", boundingBox: { x: 0, y: 0, width: 1, height: 1 } },
+            visual: { screenshot: "assets/screenshots/tampered.png", boundingBox: { x: 0, y: 0, width: 1, height: 1 } }
+          }
+        }],
         userIntent: "Align save button.",
         acceptanceCriteria: ["Button height matches controls."]
       })
     });
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json).toMatchObject({ error: "project_mismatch" });
+    expect(response.statusCode).toBe(201);
+    const taskJson = JSON.parse(
+      await readFile(join(projectPath, ".ui-annotations", "tasks", "task_trusted.json"), "utf8")
+    );
+    const taskMarkdown = await readFile(
+      join(projectPath, ".ui-annotations", "tasks", "task_trusted.md"),
+      "utf8"
+    );
+    expect(taskJson.targetPlatforms).toEqual(["web", "ios-swiftui"]);
+    expect(taskJson.evidence.screenshots).toEqual(["assets/screenshots/ann_001.png"]);
+    expect(taskMarkdown).toContain("## Annotation Notes");
+    expect(taskMarkdown).toContain("Button should be taller.");
+    expect(taskMarkdown).toContain("[data-testid='save-button']");
+    expect(taskMarkdown).toContain("assets/screenshots/ann_001.png");
+    expect(taskMarkdown).not.toContain("Tampered note");
+    expect(taskMarkdown).not.toContain("#tampered");
+    expect(taskMarkdown).not.toContain("tampered.png");
+  });
+
+  it("preserves requested annotation id order when resolving trusted records", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    const secondAnnotation = {
+      ...annotation,
+      id: "ann_002",
+      createdAt: "2026-07-02T00:00:00.000Z",
+      updatedAt: "2026-07-02T00:00:00.000Z"
+    };
+    await appendAnnotation(projectPath, annotation);
+    await appendAnnotation(projectPath, secondAnnotation);
+
+    const response = await dispatch({
+      projectPath,
+      method: "POST",
+      url: "/tasks",
+      body: JSON.stringify({
+        taskId: "task_ordered",
+        annotations: [secondAnnotation, annotation],
+        userIntent: "Align save buttons.",
+        acceptanceCriteria: ["Button heights match controls."]
+      })
+    });
+
+    expect(response.statusCode).toBe(201);
+    const taskJson = JSON.parse(
+      await readFile(join(projectPath, ".ui-annotations", "tasks", "task_ordered.json"), "utf8")
+    );
+    expect(taskJson.sourceAnnotations).toEqual(["ann_002", "ann_001"]);
+  });
+
+  it("rejects an unknown task annotation id without creating artifacts", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, annotation);
+    const response = await dispatch({
+      projectPath,
+      method: "POST",
+      url: "/tasks",
+      body: JSON.stringify({
+        taskId: "task_unknown",
+        annotations: [{ ...annotation, id: "ann_foreign", projectId: "project_other" }],
+        userIntent: "Align save button.",
+        acceptanceCriteria: ["Button height matches controls."]
+      })
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json).toMatchObject({ error: "annotation_not_found" });
     for (const suffix of ["json", "md", "prompt.md"]) {
-      await expect(readFile(join(projectPath, ".ui-annotations", "tasks", `task_mismatch.${suffix}`), "utf8"))
+      await expect(readFile(join(projectPath, ".ui-annotations", "tasks", `task_unknown.${suffix}`), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
+  it("rejects duplicate task annotation ids before creating artifacts", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, annotation);
+    const response = await dispatch({
+      projectPath,
+      method: "POST",
+      url: "/tasks",
+      body: JSON.stringify({
+        taskId: "task_duplicate",
+        annotations: [annotation, { ...annotation, note: "Duplicate submitted copy" }],
+        userIntent: "Align save button.",
+        acceptanceCriteria: ["Button height matches controls."]
+      })
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json).toMatchObject({ error: "duplicate_annotation_id" });
+    for (const suffix of ["json", "md", "prompt.md"]) {
+      await expect(readFile(join(projectPath, ".ui-annotations", "tasks", `task_duplicate.${suffix}`), "utf8"))
         .rejects.toMatchObject({ code: "ENOENT" });
     }
   });

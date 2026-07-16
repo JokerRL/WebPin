@@ -24,7 +24,7 @@
 
 Fresh local verification established the following:
 
-- Type checks, production builds, and 129 unit/API tests passed: shared 3, bridge 63, and extension 63.
+- Type checks, production builds, and 136 unit/API tests passed: shared 3, bridge 70, and extension 63.
 - The packaged MV3 extension loaded in Chromium and authenticated with the startup key.
 - The authenticated session returned `ready`, `projectName`, and the exact stable `projectId`; the packaged flow asserted that ID propagated into the saved annotation.
 - The panel reached `Ready` only after a successful authenticated session.
@@ -40,7 +40,9 @@ The implementation also has automated unit/API coverage for:
 - Timing-safe startup-key validation and non-sensitive session metadata.
 - Deterministic bootstrap project identity, concurrent-startup convergence, persistence across project moves, and preservation of screenshot settings and unknown `project.json` metadata.
 - Strict request schemas that reject obsolete browser `projectPath` input.
-- Stable-ID mismatch rejection before annotation or task writes, including legacy basename-derived pending entries.
+- Stable-ID mismatch rejection before new annotation writes, including legacy basename-derived pending entries.
+- Canonicalized reads and gradual PATCH migration for legacy saved annotations, while preserving append-only history.
+- Trusted task resolution by saved annotation ID, including tampered-payload isolation and unknown/duplicate-ID rejection before artifact writes.
 - Managed-directory symbolic-link rejection plus descriptor-level regular-file validation for every final managed read, append, and write; POSIX FIFOs are rejected.
 - Sequential save acknowledgement, partial failure, retry behavior, duplicate IDs, and refresh failure after acknowledgement.
 - Serialized concurrent pending-list mutations in the background owner and recovery after a failed Chrome storage write.
@@ -71,7 +73,7 @@ The implementation also has automated unit/API coverage for:
 ## Residual Risks and Follow-ups
 
 - Managed directories reject symbolic links. Every final managed file read, append, and write validates an opened descriptor as a regular file; supported platforms also use `O_NOFOLLOW` and `O_NONBLOCK`, and overwrite paths truncate only after validation. POSIX FIFOs are rejected. Platforms without `O_NOFOLLOW` use an `lstat`-then-`open` fallback with a final-component swap race. Hostile parent-directory swaps and hard links remain outside the personal-use threat model.
-- Legacy pending annotations with basename-derived project IDs are preserved but mismatch-blocked. Users must remove and recreate them for the authenticated stable project; automatic migration would risk assigning work to the wrong project.
+- Legacy pending annotations with basename-derived project IDs are preserved but mismatch-blocked because Chrome storage does not prove canonical-project ownership. Legacy saved annotations inside the bridge-owned canonical store are canonicalized on reads and gradually migrated when updated because their filesystem location supplies that ownership proof.
 - Pending mutations are serialized through the extension background owner. Chrome storage still offers no atomic compare-and-remove primitive, leaving a narrow window if another independent actor mutates the same key outside that owner.
 - Task response paths use Node's platform-native separator; Windows browser responses may contain backslashes. This is a minor portability cleanup.
 - Bridge tests cover representative authentication, schema, response-sanitization, and error cases. A table-driven every-route auth matrix, empty-patch policy assertions, and richer error-metadata assertions would improve coverage but are not current workflow blockers.

@@ -107,6 +107,17 @@ Hardening commits: `058a4f0` (final-file symbolic links), `3bb1cc9` (FIFO handli
 
 Outcome: the original packaged-extension GET/session reliability failure is covered locally and in CI.
 
+### Post-upgrade saved-annotation compatibility repair
+
+- [x] Kept direct store reads backward compatible while allowing authenticated API reads to overlay the canonical project ID without rewriting JSONL history.
+- [x] Made server-driven annotation updates append the current canonical project ID, gradually migrating legacy saved records.
+- [x] Kept the existing task request envelope but treated submitted annotations only as requested IDs.
+- [x] Resolved task annotations in request order from the canonical saved store and rejected unknown or duplicate IDs before creating artifacts.
+- [x] Added regressions proving tampered client notes, anchors, evidence, targets, and identities cannot enter generated task files.
+- [x] Retained strict `409 project_mismatch` rejection for new annotation writes before any annotation or event append.
+
+Outcome: legacy saved annotations remain usable after stable-identity bootstrap because canonical store location proves ownership; legacy pending browser entries remain mismatch-blocked because they lack that proof.
+
 ### Task 9: Documentation, audit, and handoff
 
 - [x] Rewrote the README as the user setup and operating guide for one startup project and copied terminal key.
@@ -130,7 +141,7 @@ git diff --check
 Results:
 
 - Type checks passed for the shared, bridge, and extension packages.
-- 129 unit/API tests passed: shared 3, bridge 63, extension 63.
+- 136 unit/API tests passed: shared 3, bridge 70, extension 63.
 - Production builds passed for all three packages.
 - Packaged Chromium completed the authenticated annotation/task workflow, including stable project-ID propagation, with no browser console or page errors.
 - The packaged test used the real built extension and server handler; CLI startup/key-printing behavior remained covered by focused unit tests rather than E2E output scraping.

@@ -294,6 +294,41 @@ describe("store", () => {
     });
   });
 
+  it("canonicalizes active annotation identities only when requested", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, annotation);
+
+    const legacyAnnotations = await listAnnotations(projectPath);
+    const canonicalAnnotations = await listAnnotations(projectPath, "project_current");
+
+    expect(legacyAnnotations[0]?.projectId).toBe("sample");
+    expect(canonicalAnnotations[0]?.projectId).toBe("project_current");
+    const history = await readFile(join(projectPath, ".ui-annotations", "annotations.jsonl"), "utf8");
+    expect(history.trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(history).projectId).toBe("sample");
+  });
+
+  it("writes a canonical identity when updating a legacy annotation", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    await appendAnnotation(projectPath, annotation);
+
+    const updated = await updateAnnotation(
+      projectPath,
+      "ann_001",
+      { status: "resolved" },
+      "project_current"
+    );
+
+    expect(updated.projectId).toBe("project_current");
+    const history = (await readFile(join(projectPath, ".ui-annotations", "annotations.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(history).toHaveLength(2);
+    expect(history[0].projectId).toBe("sample");
+    expect(history[1].projectId).toBe("project_current");
+  });
+
   it("records deleted annotations in events and excludes them from active lists", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
     await appendAnnotation(projectPath, annotation);
@@ -321,6 +356,8 @@ describe("store", () => {
     const markdown = await readFile(result.markdownPath, "utf8");
     const prompt = await readFile(result.promptPath, "utf8");
     expect(markdown).toContain("Align save button.");
+    expect(markdown).toContain("## Annotation Notes");
+    expect(markdown).toContain("- ann_001: Button should be taller.");
     expect(markdown).toContain("## Evidence");
     expect(markdown).toContain("- Screenshot: assets/screenshots/ann_001.png");
     expect(markdown).toContain("## Target Platforms");

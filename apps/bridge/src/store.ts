@@ -306,7 +306,7 @@ export async function appendAnnotation(projectPath: string, rawAnnotation: unkno
   return annotation;
 }
 
-export async function listAnnotations(projectPath: string): Promise<Annotation[]> {
+export async function listAnnotations(projectPath: string, canonicalProjectId?: string): Promise<Annotation[]> {
   await ensureAnnotationDirs(projectPath);
   const root = annotationRoot(projectPath);
   const annotationRecords = await readJsonLines(join(root, "annotations.jsonl"));
@@ -331,13 +331,16 @@ export async function listAnnotations(projectPath: string): Promise<Annotation[]
     }
   }
 
-  return Array.from(latestById.values()).sort((first, second) => first.createdAt.localeCompare(second.createdAt));
+  return Array.from(latestById.values())
+    .map((annotation) => canonicalProjectId ? { ...annotation, projectId: canonicalProjectId } : annotation)
+    .sort((first, second) => first.createdAt.localeCompare(second.createdAt));
 }
 
 export async function updateAnnotation(
   projectPath: string,
   annotationId: string,
-  patch: AnnotationPatch
+  patch: AnnotationPatch,
+  canonicalProjectId?: string
 ): Promise<Annotation> {
   const current = (await listAnnotations(projectPath)).find((annotation) => annotation.id === annotationId);
   if (!current) {
@@ -348,6 +351,7 @@ export async function updateAnnotation(
   const updated = annotationSchema.parse({
     ...current,
     ...definedPatch,
+    ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
     updatedAt: new Date().toISOString()
   });
 
@@ -399,6 +403,10 @@ function anchorSummaryLines(annotations: Annotation[]): string[] {
   ]);
 }
 
+function annotationNoteLines(annotations: Annotation[]): string[] {
+  return annotations.map((annotation) => `- ${annotation.id}: ${annotation.note}`);
+}
+
 export async function createTaskFiles(
   projectPath: string,
   input: {
@@ -430,6 +438,10 @@ export async function createTaskFiles(
       "## Acceptance Criteria",
       "",
       ...input.acceptanceCriteria.map((criterion) => `- ${criterion}`),
+      "",
+      "## Annotation Notes",
+      "",
+      ...annotationNoteLines(input.annotations),
       "",
       "## Evidence",
       "",

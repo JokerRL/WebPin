@@ -110,7 +110,11 @@ The canonical server-owned project is used by:
 
 Request schemas are strict. A `projectPath` request field or query parameter is rejected instead of ignored.
 
-Annotation and task writes also require the submitted annotations to carry the authenticated session's exact `projectId`. The server returns `409 project_mismatch` before writing annotation or task files when any ID differs.
+New annotation writes require the submitted annotation to carry the authenticated session's exact `projectId`. The server returns `409 project_mismatch` before writing annotation or event files when it differs.
+
+Saved annotations are owned by the canonical startup project that physically contains their append-only log. `GET /annotations` overlays the current opaque project ID on active records without rewriting history. `PATCH /annotations/:id` appends the updated version with that current ID, so legacy basename-derived saved records migrate gradually as the user edits them.
+
+The task request envelope still carries complete annotation objects for extension compatibility, but the server treats them only as requested IDs. It resolves those IDs, in request order, against current canonical saved annotations and uses the trusted saved notes, anchors, evidence, targets, and identity for task generation. Unknown or duplicate IDs are rejected before any task artifact is written. Client-supplied annotation content and `projectId` cannot override local saved records.
 
 The controlled agent request accepts only:
 
@@ -133,7 +137,7 @@ The browser receives only `{ "run": { "runId": "...", "status": "completed" } }`
 
 The panel does not report `ready` based on `/health`. Latest-attempt gating prevents a stale connection attempt from overwriting newer connection state. A successful session validates and stores the project name and exact opaque project ID, then removes the obsolete project-path storage key.
 
-New pending annotations use the exact stable ID from the authenticated session. The panel blocks saving a pending batch when it belongs to a different authenticated project rather than silently writing it into the current project, and the server independently enforces the same invariant before annotation and task writes.
+New pending annotations use the exact stable ID from the authenticated session. The panel blocks saving a pending batch when it belongs to a different authenticated project rather than silently writing it into the current project, and the server independently enforces the same invariant before new annotation writes.
 
 Legacy pending entries created by basename-derived builds remain in Chrome storage but fail the mismatch guard. The user must remove and recreate them after connecting to the intended project. WebPin deliberately avoids automatic migration because a basename is not sufficient proof of project ownership.
 
@@ -190,7 +194,7 @@ git diff --check
 Evidence from the fresh run:
 
 - Type checks passed for the shared, bridge, and extension packages.
-- 129 unit/API tests passed: shared 3, bridge 63, extension 63.
+- 136 unit/API tests passed: shared 3, bridge 70, extension 63.
 - Shared, bridge, and extension production builds passed.
 - Packaged Chromium loaded the real MV3 extension and completed key authentication, inline selection, stable-project-ID propagation, pending save, authenticated GET reload, status update, task JSON/Markdown/prompt generation, and delete/refresh.
 - The E2E uses the real built extension and server handler. It does not spawn the bridge CLI or read a printed startup key; focused configuration tests cover those entrypoint responsibilities.
@@ -207,6 +211,7 @@ GitHub Actions enforces the same outcomes on push and pull request with a fast `
 5. Managed-directory symbolic links, final-file symbolic links, and POSIX FIFOs are rejected; final managed I/O validates regular-file descriptors before mutation.
 6. Offline/auth failures and partial saves preserve unacknowledged pending work without duplicating acknowledged writes: covered by pending-save, credential, and mutation tests.
 7. Concurrent first startups converge on one deterministic bootstrap ID; the persisted ID survives project moves and settings writes preserve unknown metadata.
-8. `/session` returns the stable ID, new annotations use it exactly, and both extension and server mismatch guards block cross-project annotation/task writes.
+8. `/session` returns the stable ID, new annotations use it exactly, and both extension and server mismatch guards block cross-project annotation writes.
 9. Legacy basename-derived pending work remains preserved but cannot be saved without explicit removal and recreation.
-10. Type checks, 129 unit/API tests, builds, and packaged Chromium verification pass: verified on 2026-07-16.
+10. Legacy saved annotations are canonicalized at the authenticated read boundary, migrate on update, and can generate tasks only through trusted local ID resolution.
+11. Type checks, unit/API tests, builds, and packaged Chromium verification pass: verified on 2026-07-16.

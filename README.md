@@ -88,6 +88,8 @@ The first startup stores an opaque `projectId` in `.ui-annotations/project.json`
 
 Pending annotations created by an older build may contain a legacy basename-derived ID. They remain visible, but the extension and bridge block them from being written into a project whose stable ID does not match. Remove and recreate those pending annotations after reconnecting; WebPin does not guess at or silently migrate their ownership.
 
+Saved annotations already present in the canonical project's `.ui-annotations/annotations.jsonl` have a stronger ownership signal: the bridge's trusted startup path. Authenticated reads therefore expose those records with the current opaque project ID without rewriting append-only history. Updating a legacy saved annotation appends its next version with the current ID, gradually migrating active records. Task requests use submitted annotation objects only to select IDs; task notes, evidence, anchors, and targets are resolved from the canonical project's saved records, and unknown or duplicate IDs are rejected before task files are created.
+
 ### Local file safety boundary
 
 WebPin rejects symbolic links in managed directories and validates every final managed file as a regular file before reading, appending, or writing it. On platforms that support them, file opens use `O_NOFOLLOW` and `O_NONBLOCK`; overwrite paths are truncated only after descriptor validation. This also rejects POSIX FIFOs.

@@ -14,6 +14,7 @@ import {
   ensureProjectIdentity,
   listAnnotations,
   readProjectSettings,
+  safeTaskSlug,
   updateAnnotation,
   updateProjectSettings,
   writeAnnotationAsset
@@ -222,7 +223,7 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/annotations") {
-        const annotations = await listAnnotations(projectPath);
+        const annotations = await listAnnotations(projectPath, projectId);
         sendJson(response, 200, { annotations });
         return;
       }
@@ -259,7 +260,12 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
       const annotationIdMatch = requestUrl.pathname.match(/^\/annotations\/([^/]+)$/);
       if (request.method === "PATCH" && annotationIdMatch) {
         const body = annotationUpdateRequestSchema.parse(await readJson(request));
-        const annotation = await updateAnnotation(projectPath, decodeURIComponent(annotationIdMatch[1] ?? ""), body.patch);
+        const annotation = await updateAnnotation(
+          projectPath,
+          decodeURIComponent(annotationIdMatch[1] ?? ""),
+          body.patch,
+          projectId
+        );
         sendJson(response, 200, { annotation });
         return;
       }
@@ -273,10 +279,23 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
 
       if (request.method === "POST" && requestUrl.pathname === "/tasks") {
         const body = tasksRequestSchema.parse(await readJson(request));
-        assertProjectId(body.annotations, projectId);
+        safeTaskSlug(body.taskId);
+        const requestedIds = body.annotations.map((annotation) => annotation.id);
+        if (new Set(requestedIds).size !== requestedIds.length) {
+          throw new HttpError(400, "duplicate_annotation_id", "Task annotations must have unique IDs.");
+        }
+        const savedAnnotations = await listAnnotations(projectPath, projectId);
+        const savedById = new Map(savedAnnotations.map((annotation) => [annotation.id, annotation]));
+        const annotations = requestedIds.map((annotationId) => {
+          const annotation = savedById.get(annotationId);
+          if (!annotation) {
+            throw new HttpError(404, "annotation_not_found", `Saved annotation ${annotationId} was not found.`);
+          }
+          return annotation;
+        });
         const result = await createTaskFiles(projectPath, {
           taskId: body.taskId,
-          annotations: body.annotations,
+          annotations,
           userIntent: body.userIntent,
           acceptanceCriteria: body.acceptanceCriteria,
           ...(body.suggestedFiles ? { suggestedFiles: body.suggestedFiles } : {})
