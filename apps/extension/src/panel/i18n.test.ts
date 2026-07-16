@@ -35,5 +35,7 @@ describe("panel i18n", () => {
     expect(panelText.en.messages.bridgeReady("WebPin")).toContain("WebPin");
     expect(panelText.zh.messages.accessKeyRejected).toBe("访问密钥被拒绝。");
     expect(panelText.zh.messages.bridgeReady("WebPin")).toContain("WebPin");
+    expect(panelText.en.messages.pendingProjectMismatch).toContain("current project");
+    expect(panelText.zh.messages.pendingProjectMismatch).toContain("当前项目");
   });
 });

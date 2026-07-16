@@ -1,13 +1,48 @@
 import type { Annotation } from "@ui-annotations/shared";
 import type { SelectedElement } from "./content";
 import { createAnnotationFromSelection } from "./annotation-factory";
-import { createBridgeClient } from "./bridge-client";
+import { BridgeClientError, createBridgeClient } from "./bridge-client";
+import { clearCredentialsIfCurrent } from "./credential-cleanup";
+import { createPendingMutationQueue } from "./pending-mutations";
 import { mergeVisualAssetPaths, type VisualAssetPaths } from "./panel/model";
-import { accessKeyStorageKey, projectNameStorageKey } from "./panel/connection";
+import {
+  accessKeyStorageKey,
+  projectNameStorageKey
+} from "./panel/connection";
 
 const pendingAnnotationsKey = "ui-annotations.pendingAnnotations";
 const modeKey = "ui-annotations.mode";
 const screenshotCaptureEnabledKey = "ui-annotations.screenshotCaptureEnabled";
+
+const pendingMutations = createPendingMutationQueue({
+  get: async () => {
+    const result = await chrome.storage.local.get(pendingAnnotationsKey);
+    return (result[pendingAnnotationsKey] as Annotation[] | undefined) ?? [];
+  },
+  set: async (annotations) => {
+    await chrome.storage.local.set({ [pendingAnnotationsKey]: annotations });
+  }
+});
+
+async function sendFailure(
+  sendResponse: (response: unknown) => void,
+  error: unknown,
+  rejectedAccessKey = ""
+): Promise<void> {
+  try {
+    if (error instanceof BridgeClientError && error.kind === "auth") {
+      await clearCredentialsIfCurrent(chrome.storage.local, rejectedAccessKey);
+    }
+  } catch {
+    // The original bridge failure is returned from finally even if cleanup fails.
+  } finally {
+    sendResponse({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof BridgeClientError ? { kind: error.kind } : {})
+    });
+  }
+}
 
 function newCommandId(): string {
   if (globalThis.crypto?.randomUUID) {
@@ -159,8 +194,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "ui-annotations.captureVisualAssets") {
+    let requestAccessKey = "";
     chrome.storage.local.get(accessKeyStorageKey).then((result) => {
       const accessKey = String(result[accessKeyStorageKey] ?? "").trim();
+      requestAccessKey = accessKey;
       if (!accessKey) {
         throw new Error("Connect the bridge in the side panel before capturing screenshots.");
       }
@@ -171,16 +208,45 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     })
       .then((paths) => sendResponse({ ok: true, paths }))
-      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+      .catch((error) => sendFailure(sendResponse, error, requestAccessKey));
+    return true;
+  }
+
+  if (message?.type === "ui-annotations.getPendingAnnotations") {
+    chrome.storage.local.get(pendingAnnotationsKey)
+      .then((result) => sendResponse({
+        ok: true,
+        pendingAnnotations: (result[pendingAnnotationsKey] as Annotation[] | undefined) ?? []
+      }))
+      .catch((error) => sendFailure(sendResponse, error));
+    return true;
+  }
+
+  if (message?.type === "ui-annotations.appendPendingAnnotation") {
+    pendingMutations.append(message.annotation as Annotation)
+      .then((pendingAnnotations) => sendResponse({ ok: true, pendingAnnotations }))
+      .catch((error) => sendFailure(sendResponse, error));
+    return true;
+  }
+
+  if (
+    message?.type === "ui-annotations.acknowledgePendingAnnotation" ||
+    message?.type === "ui-annotations.removePendingAnnotation"
+  ) {
+    pendingMutations.removeFirst(String(message.annotationId ?? ""))
+      .then((pendingAnnotations) => sendResponse({ ok: true, pendingAnnotations }))
+      .catch((error) => sendFailure(sendResponse, error));
     return true;
   }
 
   if (message?.type === "ui-annotations.saveInlineAnnotation") {
+    let requestAccessKey = "";
     chrome.storage.local
       .get([accessKeyStorageKey, projectNameStorageKey])
       .then(async (result) => {
         const selection = message.selection as SelectedElement;
         const accessKey = String(result[accessKeyStorageKey] ?? "").trim();
+        requestAccessKey = accessKey;
         const projectName = String(result[projectNameStorageKey] ?? "").trim();
         if (!accessKey || !projectName) {
           sendResponse({ ok: false, error: "Connect the bridge in the side panel before saving." });
@@ -208,12 +274,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           annotation = mergeVisualAssetPaths(annotation, paths);
         }
 
-        const pendingResult = await chrome.storage.local.get(pendingAnnotationsKey);
-        const pendingAnnotations = (pendingResult[pendingAnnotationsKey] as Annotation[] | undefined) ?? [];
-        await chrome.storage.local.set({ [pendingAnnotationsKey]: [...pendingAnnotations, annotation] });
+        await pendingMutations.append(annotation);
         sendResponse({ ok: true, annotationId: annotation.id });
       })
-      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+      .catch((error) => sendFailure(sendResponse, error, requestAccessKey));
     return true;
   }
 

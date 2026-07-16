@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Annotation } from "@ui-annotations/shared";
 import type { SelectedElement } from "../content";
 import { createAnnotationFromSelection } from "../annotation-factory";
 import { BridgeClientError, createBridgeClient, type BridgeClient } from "../bridge-client";
+import { clearCredentialsIfCurrent } from "../credential-cleanup";
 import {
   buildTaskDraft,
   filterAnnotations,
@@ -18,10 +19,11 @@ import {
   accessKeyStorageKey,
   legacyProjectPathStorageKey,
   projectNameStorageKey,
-  storageKeysToRemoveAfterAuthFailure,
   type ConnectionState
 } from "./connection";
 import { savePendingSequentially } from "./pending-save";
+import { findProjectMismatch } from "./project-association";
+import { createLatestAttemptGate } from "./latest-attempt";
 
 const selectionKey = "ui-annotations.lastSelection";
 const pendingAnnotationsKey = "ui-annotations.pendingAnnotations";
@@ -36,6 +38,7 @@ export function App() {
   const t = panelText[getPanelLanguage()];
   const [connection, setConnection] = useState<ConnectionState>({ status: "offline" });
   const [accessKeyInput, setAccessKeyInput] = useState("");
+  const [activeAccessKey, setActiveAccessKey] = useState("");
   const [projectName, setProjectName] = useState("");
   const [selection, setSelection] = useState<SelectedElement | null>(null);
   const [note, setNote] = useState("");
@@ -63,21 +66,90 @@ export function App() {
   const [agentRunState, setAgentRunState] = useState<"idle" | "running" | "completed" | "failed">("idle");
   const [selectedPromptTemplate, setSelectedPromptTemplate] = useState<PromptTemplateId>("web-frontend-implementer");
   const [screenshotCaptureEnabled, setScreenshotCaptureEnabled] = useState(false);
+  const [isPendingSaveInProgress, setIsPendingSaveInProgress] = useState(false);
+  const attemptGateRef = useRef(createLatestAttemptGate());
+  const activeAccessKeyRef = useRef("");
 
-  const loadSavedAnnotations = async (client: BridgeClient) => {
+  const clearAuthentication = async (rejectedAccessKey: string) => {
+    if (activeAccessKeyRef.current && activeAccessKeyRef.current !== rejectedAccessKey) return false;
+    const attempt = attemptGateRef.current.begin();
+    const cleared = await clearCredentialsIfCurrent(chrome.storage.local, rejectedAccessKey);
+    if (!attemptGateRef.current.isLatest(attempt)) return false;
+    if (!cleared) return false;
+    if (!attemptGateRef.current.isLatest(attempt)) return;
+    activeAccessKeyRef.current = "";
+    setAccessKeyInput("");
+    setActiveAccessKey("");
+    setProjectName("");
+    setConnection({ status: "key-required" });
+    return true;
+  };
+
+  const handleAuthenticatedError = async (
+    error: unknown,
+    fallback: string,
+    rejectedAccessKey = activeAccessKey
+  ) => {
+    setSaveState("error");
+    if (error instanceof BridgeClientError && error.kind === "auth") {
+      try {
+        await clearAuthentication(rejectedAccessKey);
+      } catch {
+        // Keep the current session state if credential cleanup could not be persisted.
+      }
+      setMessage(t.messages.accessKeyRejected);
+      return;
+    }
+    if (error instanceof BridgeClientError && error.kind === "offline") {
+      setConnection({ status: "offline" });
+      setMessage(t.messages.bridgeOffline);
+      return;
+    }
+    setMessage(error instanceof Error ? error.message : fallback);
+  };
+
+  const loadSavedAnnotations = async (client: BridgeClient, shouldApply: () => boolean = () => true) => {
     const { annotations } = await client.listAnnotations();
+    if (!shouldApply()) return;
     setSavedAnnotations(annotations);
     setSelectedTaskAnnotationIds((current) =>
       current.filter((annotationId) => annotations.some((annotation) => annotation.id === annotationId))
     );
   };
 
-  const loadProjectSettings = async (client: BridgeClient) => {
+  const loadProjectSettings = async (client: BridgeClient, shouldApply: () => boolean = () => true) => {
     const { settings } = await client.getProjectSettings();
+    if (!shouldApply()) return;
     const enabled = settings.screenshotCaptureEnabled === true;
+    await chrome.storage.local.set({ [screenshotCaptureEnabledKey]: enabled });
+    if (!shouldApply()) return;
     setScreenshotCaptureEnabled(enabled);
-    chrome.storage.local.set({ [screenshotCaptureEnabledKey]: enabled });
   };
+
+  const pendingMessage = async (
+    type:
+      | "ui-annotations.getPendingAnnotations"
+      | "ui-annotations.appendPendingAnnotation"
+      | "ui-annotations.acknowledgePendingAnnotation"
+      | "ui-annotations.removePendingAnnotation",
+    payload: Record<string, unknown> = {}
+  ): Promise<Annotation[]> => new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type, ...payload }, (response) => {
+      const result = response as {
+        ok?: boolean;
+        pendingAnnotations?: Annotation[];
+        error?: string;
+        kind?: BridgeClientError["kind"];
+      } | undefined;
+      if (result?.ok) {
+        resolve(result.pendingAnnotations ?? []);
+        return;
+      }
+      reject(result?.kind
+        ? new BridgeClientError(result.kind, result.error ?? "Bridge request failed.")
+        : new Error(result?.error ?? "Pending annotation update failed."));
+    });
+  });
 
   const captureVisualAssets = async (annotation: Annotation, currentSelection: SelectedElement): Promise<VisualAssetPaths> =>
     new Promise((resolve, reject) => {
@@ -88,61 +160,74 @@ export function App() {
           selection: currentSelection
         },
         (response) => {
-          const result = response as { ok?: boolean; paths?: VisualAssetPaths; error?: string } | undefined;
+          const result = response as {
+            ok?: boolean;
+            paths?: VisualAssetPaths;
+            error?: string;
+            kind?: BridgeClientError["kind"];
+          } | undefined;
           if (result?.ok) {
             resolve(result.paths ?? {});
             return;
           }
-          reject(new Error(result?.error ?? t.messages.couldNotCaptureScreenshotAssets));
+          reject(result?.kind
+            ? new BridgeClientError(result.kind, result.error ?? t.messages.couldNotCaptureScreenshotAssets)
+            : new Error(result?.error ?? t.messages.couldNotCaptureScreenshotAssets));
         }
       );
     });
 
   useEffect(() => {
+    const startupAttempt = attemptGateRef.current.begin();
     chrome.storage.local.get([
       selectionKey,
       accessKeyStorageKey,
       projectNameStorageKey,
-      pendingAnnotationsKey,
       modeKey,
       screenshotCaptureEnabledKey
     ], (result) => {
+      if (!attemptGateRef.current.isLatest(startupAttempt)) return;
       const storedSelection = (result[selectionKey] as SelectedElement | undefined) ?? null;
       const storedAccessKey = String(result[accessKeyStorageKey] ?? "").trim();
       setSelection(storedSelection);
       setAccessKeyInput(storedAccessKey);
       setScreenshotCaptureEnabled(result[screenshotCaptureEnabledKey] === true);
-      setPendingAnnotations((result[pendingAnnotationsKey] as Annotation[] | undefined) ?? []);
       setAnnotationMode((result[modeKey] as AnnotationMode | undefined) ?? "idle");
+
+      pendingMessage("ui-annotations.getPendingAnnotations")
+        .then((latest) => {
+          if (attemptGateRef.current.isLatest(startupAttempt)) setPendingAnnotations(latest);
+        })
+        .catch(() => {
+          // The storage change listener will still receive future background-owned mutations.
+        });
 
       const client = createBridgeClient({ accessKey: storedAccessKey });
       client.getHealth()
         .then(async () => {
+          if (!attemptGateRef.current.isLatest(startupAttempt)) return;
           if (!storedAccessKey) {
             setConnection({ status: "key-required" });
             return;
           }
           try {
             const session = await client.getSession();
+            if (!attemptGateRef.current.isLatest(startupAttempt)) return;
             setConnection({ status: "ready", projectName: session.projectName });
+            activeAccessKeyRef.current = storedAccessKey;
+            setActiveAccessKey(storedAccessKey);
             setProjectName(session.projectName);
-            await Promise.all([loadSavedAnnotations(client), loadProjectSettings(client)]);
+            const shouldApply = () => attemptGateRef.current.isLatest(startupAttempt);
+            await Promise.all([loadSavedAnnotations(client, shouldApply), loadProjectSettings(client, shouldApply)]);
+            if (!attemptGateRef.current.isLatest(startupAttempt)) return;
           } catch (error) {
-            if (error instanceof BridgeClientError && error.kind === "auth") {
-              await chrome.storage.local.remove(storageKeysToRemoveAfterAuthFailure());
-              setAccessKeyInput("");
-              setProjectName("");
-              setConnection({ status: "key-required" });
-              setMessage(t.messages.accessKeyRejected);
-              return;
-            }
-            setConnection({ status: "offline" });
-            setMessage(t.messages.bridgeOffline);
+            if (!attemptGateRef.current.isLatest(startupAttempt)) return;
+            await handleAuthenticatedError(error, t.messages.couldNotLoadSavedAnnotations, storedAccessKey);
           }
         })
-        .catch(() => {
-          setConnection({ status: "offline" });
-          setMessage(t.messages.bridgeOffline);
+        .catch(async (error) => {
+          if (!attemptGateRef.current.isLatest(startupAttempt)) return;
+          await handleAuthenticatedError(error, t.messages.bridgeOffline);
         });
     });
 
@@ -165,10 +250,19 @@ export function App() {
       if (areaName === "local" && changes[screenshotCaptureEnabledKey]) {
         setScreenshotCaptureEnabled(changes[screenshotCaptureEnabledKey].newValue === true);
       }
+      if (areaName === "local" && changes[accessKeyStorageKey] && !changes[accessKeyStorageKey].newValue) {
+        attemptGateRef.current.invalidate();
+        setAccessKeyInput("");
+        activeAccessKeyRef.current = "";
+        setActiveAccessKey("");
+        setProjectName("");
+        setConnection({ status: "key-required" });
+      }
     };
     chrome.storage.onChanged.addListener(onStorageChanged);
 
     return () => {
+      attemptGateRef.current.invalidate();
       chrome.storage.onChanged.removeListener(onStorageChanged);
     };
   }, []);
@@ -197,6 +291,7 @@ export function App() {
   };
 
   const connectBridge = async () => {
+    const attempt = attemptGateRef.current.begin();
     const accessKey = accessKeyInput.trim();
     if (!accessKey) {
       setConnection({ status: "key-required" });
@@ -209,29 +304,26 @@ export function App() {
     try {
       const client = createBridgeClient({ accessKey });
       const session = await client.getSession();
+      if (!attemptGateRef.current.isLatest(attempt)) return;
       await chrome.storage.local.set({
         [accessKeyStorageKey]: accessKey,
         [projectNameStorageKey]: session.projectName
       });
+      if (!attemptGateRef.current.isLatest(attempt)) return;
       await chrome.storage.local.remove(legacyProjectPathStorageKey);
+      if (!attemptGateRef.current.isLatest(attempt)) return;
+      setActiveAccessKey(accessKey);
+      activeAccessKeyRef.current = accessKey;
       setProjectName(session.projectName);
       setConnection({ status: "ready", projectName: session.projectName });
-      await Promise.all([loadSavedAnnotations(client), loadProjectSettings(client)]);
+      const shouldApply = () => attemptGateRef.current.isLatest(attempt);
+      await Promise.all([loadSavedAnnotations(client, shouldApply), loadProjectSettings(client, shouldApply)]);
+      if (!attemptGateRef.current.isLatest(attempt)) return;
       setSaveState("saved");
       setMessage(t.messages.bridgeReady(session.projectName));
     } catch (error) {
-      if (error instanceof BridgeClientError && error.kind === "auth") {
-        await chrome.storage.local.remove(storageKeysToRemoveAfterAuthFailure());
-        setAccessKeyInput("");
-        setProjectName("");
-        setConnection({ status: "key-required" });
-        setSaveState("error");
-        setMessage(t.messages.accessKeyRejected);
-        return;
-      }
-      setConnection({ status: "offline" });
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : t.messages.bridgeOffline);
+      if (!attemptGateRef.current.isLatest(attempt)) return;
+      await handleAuthenticatedError(error, t.messages.bridgeOffline, accessKey);
     }
   };
 
@@ -242,23 +334,32 @@ export function App() {
       return;
     }
 
-    setScreenshotCaptureEnabled(enabled);
-    chrome.storage.local.set({ [screenshotCaptureEnabledKey]: enabled });
+    const previousEnabled = screenshotCaptureEnabled;
     setSaveState("saving");
     setMessage(t.messages.updatingProjectSettings);
+    let remoteUpdated = false;
     try {
-      const { settings } = await createBridgeClient({ accessKey: accessKeyInput.trim() })
+      const client = createBridgeClient({ accessKey: activeAccessKey });
+      const { settings } = await client
         .updateProjectSettings(enabled);
+      remoteUpdated = true;
       const nextEnabled = settings.screenshotCaptureEnabled === true;
+      await chrome.storage.local.set({ [screenshotCaptureEnabledKey]: nextEnabled });
       setScreenshotCaptureEnabled(nextEnabled);
-      chrome.storage.local.set({ [screenshotCaptureEnabledKey]: nextEnabled });
       setSaveState("saved");
       setMessage(nextEnabled ? t.messages.screenshotEnabled : t.messages.screenshotDisabled);
     } catch (error) {
-      setScreenshotCaptureEnabled(!enabled);
-      chrome.storage.local.set({ [screenshotCaptureEnabledKey]: !enabled });
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      setScreenshotCaptureEnabled(previousEnabled);
+      if (remoteUpdated) {
+        try {
+          await createBridgeClient({ accessKey: activeAccessKey }).updateProjectSettings(previousEnabled);
+          await chrome.storage.local.set({ [screenshotCaptureEnabledKey]: previousEnabled });
+        } catch (rollbackError) {
+          await handleAuthenticatedError(rollbackError, t.messages.couldNotUpdateProjectSettings);
+          return;
+        }
+      }
+      await handleAuthenticatedError(error, t.messages.couldNotUpdateProjectSettings);
     }
   };
 
@@ -298,22 +399,24 @@ export function App() {
         const paths = await captureVisualAssets(annotation, selection);
         annotation = mergeVisualAssetPaths(annotation, paths);
       }
-      const nextPendingAnnotations = [...pendingAnnotations, annotation];
-      chrome.storage.local.set({ [pendingAnnotationsKey]: nextPendingAnnotations });
-      setPendingAnnotations(nextPendingAnnotations);
+      const latest = await pendingMessage("ui-annotations.appendPendingAnnotation", { annotation });
+      setPendingAnnotations(latest);
       setSaveState("saved");
       setMessage(t.messages.addedToPending(annotation.id));
       setNote("");
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotCaptureScreenshotAssets);
     }
   };
 
-  const removePendingAnnotation = (annotationId: string) => {
-    const nextPendingAnnotations = pendingAnnotations.filter((annotation) => annotation.id !== annotationId);
-    setPendingAnnotations(nextPendingAnnotations);
-    chrome.storage.local.set({ [pendingAnnotationsKey]: nextPendingAnnotations });
+  const removePendingAnnotation = async (annotationId: string) => {
+    if (isPendingSaveInProgress) return;
+    try {
+      const latest = await pendingMessage("ui-annotations.removePendingAnnotation", { annotationId });
+      setPendingAnnotations(latest);
+    } catch (error) {
+      await handleAuthenticatedError(error, t.messages.bridgeRejected(annotationId));
+    }
   };
 
   const refreshSavedAnnotations = async () => {
@@ -326,12 +429,11 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.loadingSavedAnnotations);
     try {
-      await loadSavedAnnotations(createBridgeClient({ accessKey: accessKeyInput.trim() }));
+      await loadSavedAnnotations(createBridgeClient({ accessKey: activeAccessKey }));
       setSaveState("saved");
       setMessage(t.messages.savedAnnotationsLoaded);
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotLoadSavedAnnotations);
     }
   };
 
@@ -345,14 +447,13 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.updatingAnnotation(annotationId));
     try {
-      const { annotation } = await createBridgeClient({ accessKey: accessKeyInput.trim() })
+      const { annotation } = await createBridgeClient({ accessKey: activeAccessKey })
         .updateAnnotation(annotationId, { status });
       setSavedAnnotations((current) => replaceAnnotation(current, annotation));
       setSaveState("saved");
       setMessage(t.messages.updatedAnnotation(annotationId));
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotUpdateAnnotation(annotationId));
     }
   };
 
@@ -366,14 +467,13 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.deletingAnnotation(annotationId));
     try {
-      await createBridgeClient({ accessKey: accessKeyInput.trim() }).deleteAnnotation(annotationId);
+      await createBridgeClient({ accessKey: activeAccessKey }).deleteAnnotation(annotationId);
       setSavedAnnotations((current) => removeAnnotationById(current, annotationId));
       setSelectedTaskAnnotationIds((current) => current.filter((id) => id !== annotationId));
       setSaveState("saved");
       setMessage(t.messages.deletedAnnotation(annotationId));
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotDeleteAnnotation(annotationId));
     }
   };
 
@@ -390,10 +490,18 @@ export function App() {
       return;
     }
 
+    const mismatch = findProjectMismatch(pendingAnnotations, projectName);
+    if (mismatch) {
+      setSaveState("error");
+      setMessage(t.messages.pendingProjectMismatch);
+      return;
+    }
+
+    setIsPendingSaveInProgress(true);
     setSaveState("saving");
     setMessage(t.messages.savingAnnotations(pendingAnnotations.length));
     const savedCount = pendingAnnotations.length;
-    const client = createBridgeClient({ accessKey: accessKeyInput.trim() });
+    const client = createBridgeClient({ accessKey: activeAccessKey });
     try {
       await savePendingSequentially(
         pendingAnnotations,
@@ -401,20 +509,19 @@ export function App() {
           await client.createAnnotation(annotation);
         },
         async (acknowledged) => {
-          const result = await chrome.storage.local.get(pendingAnnotationsKey);
-          const latest = (result[pendingAnnotationsKey] as Annotation[] | undefined) ?? [];
-          const index = latest.findIndex((annotation) => annotation.id === acknowledged.id);
-          const updated = index < 0 ? latest : [...latest.slice(0, index), ...latest.slice(index + 1)];
-          await chrome.storage.local.set({ [pendingAnnotationsKey]: updated });
-          setPendingAnnotations(updated);
+          const latest = await pendingMessage("ui-annotations.acknowledgePendingAnnotation", {
+            annotationId: acknowledged.id
+          });
+          setPendingAnnotations(latest);
         }
       );
       await loadSavedAnnotations(client);
       setSaveState("saved");
       setMessage(t.messages.savedAnnotationsToFiles(savedCount));
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.bridgeRejected("annotation"));
+    } finally {
+      setIsPendingSaveInProgress(false);
     }
   };
 
@@ -488,7 +595,7 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.generatingTask(taskId.trim()));
     try {
-      const body = await createBridgeClient({ accessKey: accessKeyInput.trim() }).createTask({
+      const body = await createBridgeClient({ accessKey: activeAccessKey }).createTask({
         taskId: taskId.trim(),
         annotations: selectedAnnotations,
         userIntent: userIntent.trim(),
@@ -500,8 +607,7 @@ export function App() {
       setSaveState("saved");
       setMessage(t.messages.generatedTask(body.markdownPath ?? taskId.trim()));
     } catch (error) {
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotGenerateTask(taskId.trim()));
     }
   };
 
@@ -522,7 +628,7 @@ export function App() {
     setAgentRunState("running");
     setMessage(t.messages.sendingToCodex(taskIdToRun));
     try {
-      const body = await createBridgeClient({ accessKey: accessKeyInput.trim() }).runAgent(taskIdToRun);
+      const body = await createBridgeClient({ accessKey: activeAccessKey }).runAgent(taskIdToRun);
 
       setAgentRunState(body.run.status);
       setSaveState(body.run.status === "completed" ? "saved" : "error");
@@ -533,8 +639,7 @@ export function App() {
       );
     } catch (error) {
       setAgentRunState("failed");
-      setSaveState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      await handleAuthenticatedError(error, t.messages.couldNotSendToCodex(taskIdToRun));
     }
   };
 
@@ -554,6 +659,8 @@ export function App() {
         <h1 style={{ fontSize: 18, lineHeight: 1.2, margin: "0 0 8px" }}>{t.title}</h1>
         <div style={{ alignItems: "center", display: "flex", gap: 8, flexWrap: "wrap" }}>
           <span
+            role="status"
+            aria-live="polite"
             style={{
               background: connection.status === "ready" ? "rgba(52, 211, 153, 0.12)" : "rgba(249, 115, 22, 0.12)",
               border: `1px solid ${connection.status === "ready" ? "#047857" : "#c2410c"}`,
@@ -602,11 +709,7 @@ export function App() {
           <input
             type="password"
             value={accessKeyInput}
-            onChange={(event) => {
-              setAccessKeyInput(event.target.value);
-              setProjectName("");
-              setConnection({ status: "key-required" });
-            }}
+            onChange={(event) => setAccessKeyInput(event.target.value)}
             placeholder={t.accessKeyPlaceholder}
             autoComplete="off"
             style={{
@@ -731,6 +834,7 @@ export function App() {
                   </strong>
                   <span style={{ color: "#93a4b3", fontSize: 12, lineHeight: 1.35 }}>{annotation.note}</span>
                   <button
+                    disabled={isPendingSaveInProgress}
                     onClick={() => removePendingAnnotation(annotation.id)}
                     type="button"
                     style={{
@@ -754,7 +858,12 @@ export function App() {
             </p>
           )}
           <button
-            disabled={connection.status !== "ready" || saveState === "saving" || pendingAnnotations.length === 0}
+            disabled={
+              connection.status !== "ready" ||
+              saveState === "saving" ||
+              isPendingSaveInProgress ||
+              pendingAnnotations.length === 0
+            }
             onClick={saveAllAnnotations}
             type="button"
             style={{
@@ -1225,7 +1334,7 @@ export function App() {
         </fieldset>
 
         <button
-          disabled={connection.status !== "ready" || saveState === "saving"}
+          disabled={connection.status !== "ready" || saveState === "saving" || isPendingSaveInProgress}
           onClick={saveAnnotation}
           type="button"
           style={{
@@ -1243,7 +1352,11 @@ export function App() {
         </button>
 
         {message ? (
-          <p style={{ color: saveState === "error" ? "#fca5a5" : "#86efac", fontSize: 13, lineHeight: 1.4, margin: 0 }}>
+          <p
+            role="status"
+            aria-live="polite"
+            style={{ color: saveState === "error" ? "#fca5a5" : "#86efac", fontSize: 13, lineHeight: 1.4, margin: 0 }}
+          >
             {message}
           </p>
         ) : null}

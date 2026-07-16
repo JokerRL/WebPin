@@ -65,6 +65,7 @@ type PanelCopy = {
     accessKeyRejected: string;
     bridgeOffline: string;
     bridgeReady: (projectName: string) => string;
+    pendingProjectMismatch: string;
     clickElement: string;
     couldNotStartSelection: string;
     updatingProjectSettings: string;
@@ -201,6 +202,7 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
       accessKeyRejected: "Access key rejected.",
       bridgeOffline: "Bridge offline.",
       bridgeReady: (projectName) => `Bridge ready for ${projectName}.`,
+      pendingProjectMismatch: "Pending annotations belong to another project. Remove them or reconnect to their current project before saving.",
       clickElement: "Click one element on the page.",
       couldNotStartSelection: "Could not start selection on the active tab.",
       updatingProjectSettings: "Updating project settings...",
@@ -335,6 +337,7 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
       accessKeyRejected: "访问密钥被拒绝。",
       bridgeOffline: "Bridge 离线。",
       bridgeReady: (projectName) => `Bridge 已为 ${projectName} 就绪。`,
+      pendingProjectMismatch: "待保存标注属于其他项目。请移除这些标注，或重新连接到它们的当前项目后再保存。",
       clickElement: "请在页面中点击一个元素。",
       couldNotStartSelection: "无法在当前标签页开始选择。",
       updatingProjectSettings: "正在更新项目设置...",
