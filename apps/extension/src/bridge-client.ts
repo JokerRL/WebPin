@@ -7,6 +7,7 @@ export type EditableAnnotationPatch = Partial<{
   changeType: Annotation["changeType"];
   priority: Annotation["priority"];
   status: Exclude<Annotation["status"], "deleted">;
+  targetPlatforms: Annotation["targetPlatforms"];
 }>;
 
 export class BridgeClientError extends Error {

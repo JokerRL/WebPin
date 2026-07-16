@@ -49,4 +49,22 @@ describe("createBridgeClient", () => {
       kind: "offline"
     });
   });
+
+  it("preserves target platforms in annotation update patches", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ annotation: {} }), { status: 200 })
+    );
+
+    await createBridgeClient({ accessKey: "secret", fetcher }).updateAnnotation("ann_001", {
+      targetPlatforms: ["web"]
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "http://127.0.0.1:48731/annotations/ann_001",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ patch: { targetPlatforms: ["web"] } })
+      })
+    );
+  });
 });
