@@ -1,13 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { z, ZodError } from "zod";
 import { annotationSchema } from "@ui-annotations/shared";
+import { z, ZodError } from "zod";
 import { runCodexTask as defaultRunCodexTask } from "./agent-runner.js";
+import { AccessKeyError, assertAccessKey } from "./auth.js";
+import { loadBridgeConfig, type BridgeConfig } from "./config.js";
 import {
   appendAnnotation,
-  assertSafeProjectPath,
   createTaskFiles,
   deleteAnnotation,
+  ensureAnnotationDirs,
   listAnnotations,
   readProjectSettings,
   updateAnnotation,
@@ -28,10 +31,11 @@ class HttpError extends Error {
   }
 }
 
-const annotationsRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  annotation: z.unknown()
-});
+const annotationsRequestSchema = z
+  .object({
+    annotation: z.unknown()
+  })
+  .strict();
 
 const annotationPatchSchema = z
   .object({
@@ -44,14 +48,13 @@ const annotationPatchSchema = z
   .strict()
   .refine((patch) => Object.keys(patch).length > 0, "Patch must include at least one editable field.");
 
-const annotationUpdateRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  patch: annotationPatchSchema
-});
+const annotationUpdateRequestSchema = z
+  .object({
+    patch: annotationPatchSchema
+  })
+  .strict();
 
-const annotationDeleteRequestSchema = z.object({
-  projectPath: z.string().min(1)
-});
+const annotationDeleteRequestSchema = z.object({}).strict();
 
 const projectSettingsPatchSchema = z
   .object({
@@ -60,32 +63,38 @@ const projectSettingsPatchSchema = z
   .strict()
   .refine((patch) => Object.keys(patch).length > 0, "Patch must include at least one project setting.");
 
-const projectSettingsUpdateRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  patch: projectSettingsPatchSchema
-});
+const projectSettingsUpdateRequestSchema = z
+  .object({
+    patch: projectSettingsPatchSchema
+  })
+  .strict();
 
-const assetRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  annotationId: z.string().min(1),
-  kind: z.enum(["screenshot", "crop"]),
-  dataUrl: z.string().regex(/^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/]+={0,2}$/)
-});
+const supportedImageDataUrl = /^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/]+={0,2}$/;
 
-const tasksRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  taskId: z.string().min(1),
-  annotations: z.array(annotationSchema).min(1),
-  userIntent: z.string().min(1),
-  acceptanceCriteria: z.array(z.string().min(1)).min(1),
-  suggestedFiles: z.array(z.string()).optional()
-});
+const assetRequestSchema = z
+  .object({
+    annotationId: z.string().min(1),
+    kind: z.enum(["screenshot", "crop"]),
+    dataUrl: z.string().regex(supportedImageDataUrl)
+  })
+  .strict();
 
-const agentRunsRequestSchema = z.object({
-  projectPath: z.string().min(1),
-  taskId: z.string().min(1),
-  agent: z.literal("codex")
-});
+const tasksRequestSchema = z
+  .object({
+    taskId: z.string().min(1),
+    annotations: z.array(annotationSchema).min(1),
+    userIntent: z.string().min(1),
+    acceptanceCriteria: z.array(z.string().min(1)).min(1),
+    suggestedFiles: z.array(z.string()).optional()
+  })
+  .strict();
+
+const agentRunsRequestSchema = z
+  .object({
+    taskId: z.string().min(1),
+    agent: z.literal("codex")
+  })
+  .strict();
 
 async function readJson(request: NodeJS.ReadableStream): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -105,6 +114,11 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 }
 
 function handleError(response: ServerResponse, error: unknown): void {
+  if (error instanceof AccessKeyError) {
+    sendJson(response, error.status, { error: error.code, message: error.message });
+    return;
+  }
+
   if (error instanceof HttpError) {
     sendJson(response, error.status, { error: error.code, message: error.message });
     return;
@@ -123,15 +137,6 @@ function handleError(response: ServerResponse, error: unknown): void {
   sendJson(response, 500, { error: "internal_error" });
 }
 
-function allowedOriginsHeader(request: IncomingMessage): string {
-  const origin = request.headers.origin;
-  if (origin && isAllowedOrigin(origin)) {
-    return origin;
-  }
-
-  return "http://localhost";
-}
-
 function defaultAllowedOrigins(): string[] {
   return (process.env.UI_ANNOTATIONS_ALLOWED_ORIGINS ?? "http://localhost,chrome-extension://*")
     .split(",")
@@ -139,11 +144,7 @@ function defaultAllowedOrigins(): string[] {
     .filter(Boolean);
 }
 
-function defaultAllowedProjectRoots(): string[] {
-  return (process.env.UI_ANNOTATIONS_ALLOWED_PROJECT_ROOTS ?? process.cwd()).split(":").filter(Boolean);
-}
-
-function isAllowedOrigin(origin: string, allowedOrigins = defaultAllowedOrigins()): boolean {
+function isAllowedOrigin(origin: string, allowedOrigins: string[]): boolean {
   return allowedOrigins.some((allowedOrigin) => {
     if (allowedOrigin === "chrome-extension://*") {
       return origin.startsWith("chrome-extension://");
@@ -153,33 +154,33 @@ function isAllowedOrigin(origin: string, allowedOrigins = defaultAllowedOrigins(
   });
 }
 
-function assertAllowedOrigin(request: IncomingMessage, allowedOrigins: string[]): void {
+function allowedOriginsHeader(request: IncomingMessage, allowedOrigins: string[]): string | undefined {
   const origin = request.headers.origin;
-  if (!origin || !isAllowedOrigin(origin, allowedOrigins)) {
-    throw new HttpError(403, "origin_not_allowed", "Origin is not bound to this bridge.");
-  }
+  return origin && isAllowedOrigin(origin, allowedOrigins) ? origin : undefined;
 }
 
-type BridgeOptions = {
-  allowedProjectRoots?: string[];
+export type BridgeOptions = BridgeConfig & {
   allowedOrigins?: string[];
   runCodexTask?: typeof defaultRunCodexTask;
 };
 
-export function createBridgeServer(options: BridgeOptions = {}) {
+export function createBridgeServer(options: BridgeOptions) {
   return createServer(createBridgeRequestHandler(options));
 }
 
-export function createBridgeRequestHandler(options: BridgeOptions = {}) {
-  const allowedProjectRoots = options.allowedProjectRoots ?? defaultAllowedProjectRoots();
+export function createBridgeRequestHandler(options: BridgeOptions) {
+  const { accessKey, projectName, projectPath } = options;
   const allowedOrigins = options.allowedOrigins ?? defaultAllowedOrigins();
   const runCodexTask = options.runCodexTask ?? defaultRunCodexTask;
 
   return async (request: IncomingMessage, response: ServerResponse) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
-      response.setHeader("Access-Control-Allow-Origin", allowedOriginsHeader(request));
-      response.setHeader("Access-Control-Allow-Headers", "content-type");
+      const allowedOrigin = allowedOriginsHeader(request, allowedOrigins);
+      if (allowedOrigin) {
+        response.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      }
+      response.setHeader("Access-Control-Allow-Headers", "content-type,x-webpin-key");
       response.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
 
       if (request.method === "OPTIONS") {
@@ -189,60 +190,50 @@ export function createBridgeRequestHandler(options: BridgeOptions = {}) {
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/health") {
-        sendJson(response, 200, { ok: true });
+        sendJson(response, 200, { ok: true, authentication: "access-key" });
+        return;
+      }
+
+      const submittedKey = request.headers["x-webpin-key"];
+      assertAccessKey(typeof submittedKey === "string" ? submittedKey : undefined, accessKey);
+
+      if (requestUrl.searchParams.has("projectPath")) {
+        throw new HttpError(400, "invalid_schema", "projectPath query parameters are not supported.");
+      }
+
+      if (request.method === "GET" && requestUrl.pathname === "/session") {
+        sendJson(response, 200, { ready: true, projectName });
         return;
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/annotations") {
-        assertAllowedOrigin(request, allowedOrigins);
-        const requestedProjectPath = requestUrl.searchParams.get("projectPath");
-        if (!requestedProjectPath) {
-          throw new HttpError(400, "invalid_request", "projectPath query parameter is required.");
-        }
-        const projectPath = assertSafeProjectPath(requestedProjectPath, allowedProjectRoots);
         const annotations = await listAnnotations(projectPath);
         sendJson(response, 200, { annotations });
         return;
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/project-settings") {
-        assertAllowedOrigin(request, allowedOrigins);
-        const requestedProjectPath = requestUrl.searchParams.get("projectPath");
-        if (!requestedProjectPath) {
-          throw new HttpError(400, "invalid_request", "projectPath query parameter is required.");
-        }
-        const projectPath = assertSafeProjectPath(requestedProjectPath, allowedProjectRoots);
         const settings = await readProjectSettings(projectPath);
         sendJson(response, 200, { settings });
         return;
       }
 
       if (request.method === "PATCH" && requestUrl.pathname === "/project-settings") {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = projectSettingsUpdateRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
         const settings = await updateProjectSettings(projectPath, body.patch);
         sendJson(response, 200, { settings });
         return;
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/assets") {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = assetRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
-        const path = await writeAnnotationAsset(projectPath, {
-          annotationId: body.annotationId,
-          kind: body.kind,
-          dataUrl: body.dataUrl
-        });
+        const path = await writeAnnotationAsset(projectPath, body);
         sendJson(response, 201, { path });
         return;
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/annotations") {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = annotationsRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
         const annotation = await appendAnnotation(projectPath, body.annotation);
         sendJson(response, 201, { annotation });
         return;
@@ -250,27 +241,21 @@ export function createBridgeRequestHandler(options: BridgeOptions = {}) {
 
       const annotationIdMatch = requestUrl.pathname.match(/^\/annotations\/([^/]+)$/);
       if (request.method === "PATCH" && annotationIdMatch) {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = annotationUpdateRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
         const annotation = await updateAnnotation(projectPath, decodeURIComponent(annotationIdMatch[1] ?? ""), body.patch);
         sendJson(response, 200, { annotation });
         return;
       }
 
       if (request.method === "DELETE" && annotationIdMatch) {
-        assertAllowedOrigin(request, allowedOrigins);
-        const body = annotationDeleteRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
+        annotationDeleteRequestSchema.parse(await readJson(request));
         await deleteAnnotation(projectPath, decodeURIComponent(annotationIdMatch[1] ?? ""));
         sendJson(response, 200, { ok: true });
         return;
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/tasks") {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = tasksRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
         const result = await createTaskFiles(projectPath, {
           taskId: body.taskId,
           annotations: body.annotations,
@@ -278,14 +263,16 @@ export function createBridgeRequestHandler(options: BridgeOptions = {}) {
           acceptanceCriteria: body.acceptanceCriteria,
           ...(body.suggestedFiles ? { suggestedFiles: body.suggestedFiles } : {})
         });
-        sendJson(response, 201, result);
+        sendJson(response, 201, {
+          jsonPath: relative(projectPath, result.jsonPath),
+          markdownPath: relative(projectPath, result.markdownPath),
+          promptPath: relative(projectPath, result.promptPath)
+        });
         return;
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/agent-runs") {
-        assertAllowedOrigin(request, allowedOrigins);
         const body = agentRunsRequestSchema.parse(await readJson(request));
-        const projectPath = assertSafeProjectPath(body.projectPath, allowedProjectRoots);
         const run = await runCodexTask(projectPath, { taskId: body.taskId });
         sendJson(response, 201, { run });
         return;
@@ -299,7 +286,11 @@ export function createBridgeRequestHandler(options: BridgeOptions = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createBridgeServer().listen(port, host, () => {
+  const config = await loadBridgeConfig();
+  await ensureAnnotationDirs(config.projectPath);
+  createBridgeServer(config).listen(port, host, () => {
     console.log(`ui-annotations bridge listening at http://${host}:${port}`);
+    console.log(`project: ${config.projectName}`);
+    console.log(`access key: ${config.accessKey}`);
   });
 }

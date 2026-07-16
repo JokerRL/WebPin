@@ -59,25 +59,6 @@ async function readJsonLines(filePath: string): Promise<unknown[]> {
   }
 }
 
-export function assertSafeProjectPath(projectPath: string, allowedProjectRoots: string[]): string {
-  if (!isAbsolute(projectPath)) {
-    throw new Error("projectPath must be absolute");
-  }
-
-  const resolvedProjectPath = resolve(projectPath);
-  const isAllowed = allowedProjectRoots.some((root) => {
-    const resolvedRoot = resolve(root);
-    const rel = relative(resolvedRoot, resolvedProjectPath);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  });
-
-  if (!isAllowed) {
-    throw new Error("projectPath is not allowed");
-  }
-
-  return resolvedProjectPath;
-}
-
 export function safeTaskSlug(taskId: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(taskId)) {
     throw new Error("taskId must be a filename-safe slug");
