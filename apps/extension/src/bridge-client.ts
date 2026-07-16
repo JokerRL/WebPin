@@ -1,0 +1,125 @@
+import type { Annotation } from "@ui-annotations/shared";
+
+const defaultBridgeUrl = "http://127.0.0.1:48731";
+
+export type EditableAnnotationPatch = Partial<{
+  note: Annotation["note"];
+  changeType: Annotation["changeType"];
+  priority: Annotation["priority"];
+  status: Exclude<Annotation["status"], "deleted">;
+}>;
+
+export class BridgeClientError extends Error {
+  constructor(
+    public readonly kind: "offline" | "auth" | "http",
+    message: string
+  ) {
+    super(message);
+    this.name = "BridgeClientError";
+  }
+}
+
+type ClientOptions = {
+  accessKey: string;
+  fetcher?: typeof fetch;
+  bridgeUrl?: string;
+};
+
+type BridgeErrorBody = {
+  error?: string;
+  message?: string;
+};
+
+export function createBridgeClient({
+  accessKey,
+  fetcher = fetch,
+  bridgeUrl = defaultBridgeUrl
+}: ClientOptions) {
+  async function request<T>(path: string, init: RequestInit = {}, authenticated = true): Promise<T> {
+    const headers = new Headers(init.headers);
+    if (init.body) {
+      headers.set("content-type", "application/json");
+    }
+    if (authenticated) {
+      headers.set("x-webpin-key", accessKey);
+    }
+
+    let response: Response;
+    try {
+      response = await fetcher(`${bridgeUrl}${path}`, {
+        ...init,
+        headers: Object.fromEntries(headers.entries())
+      });
+    } catch (error) {
+      throw new BridgeClientError("offline", error instanceof Error ? error.message : String(error));
+    }
+
+    const body = (await response.json().catch(() => ({}))) as BridgeErrorBody;
+    if (response.status === 401 || body.error === "invalid_access_key") {
+      throw new BridgeClientError("auth", body.message ?? "Access key rejected.");
+    }
+    if (!response.ok) {
+      throw new BridgeClientError(
+        "http",
+        body.message ?? body.error ?? `Bridge request failed (${response.status}).`
+      );
+    }
+
+    return body as T;
+  }
+
+  return {
+    getHealth: () => request<{ ok: true; authentication: "access-key" }>("/health", {}, false),
+    getSession: () => request<{ ready: true; projectName: string }>("/session"),
+    listAnnotations: () => request<{ annotations: Annotation[] }>("/annotations"),
+    createAnnotation: (annotation: Annotation) =>
+      request<{ annotation: Annotation }>("/annotations", {
+        method: "POST",
+        body: JSON.stringify({ annotation })
+      }),
+    updateAnnotation: (id: string, patch: EditableAnnotationPatch) =>
+      request<{ annotation: Annotation }>(`/annotations/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ patch })
+      }),
+    deleteAnnotation: (id: string) =>
+      request<{ ok: true }>(`/annotations/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({})
+      }),
+    getProjectSettings: () =>
+      request<{ settings: { screenshotCaptureEnabled: boolean } }>("/project-settings"),
+    updateProjectSettings: (screenshotCaptureEnabled: boolean) =>
+      request<{ settings: { screenshotCaptureEnabled: boolean } }>("/project-settings", {
+        method: "PATCH",
+        body: JSON.stringify({ patch: { screenshotCaptureEnabled } })
+      }),
+    writeAsset: (input: {
+      annotationId: string;
+      kind: "screenshot" | "crop";
+      dataUrl: string;
+    }) =>
+      request<{ path: string }>("/assets", {
+        method: "POST",
+        body: JSON.stringify(input)
+      }),
+    createTask: (input: {
+      taskId: string;
+      annotations: Annotation[];
+      userIntent: string;
+      acceptanceCriteria: string[];
+      suggestedFiles?: string[];
+    }) =>
+      request<{ jsonPath: string; markdownPath: string; promptPath: string }>("/tasks", {
+        method: "POST",
+        body: JSON.stringify(input)
+      }),
+    runAgent: (taskId: string) =>
+      request<{ run: { runId: string; status: "completed" | "failed" } }>("/agent-runs", {
+        method: "POST",
+        body: JSON.stringify({ taskId, agent: "codex" })
+      })
+  };
+}
+
+export type BridgeClient = ReturnType<typeof createBridgeClient>;
