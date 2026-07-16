@@ -347,7 +347,7 @@ describe("bridge server", () => {
     expect(invalid.json).toMatchObject({ error: "invalid_schema" });
   });
 
-  it("starts a controlled codex run against the configured project", async () => {
+  it("returns only sanitized browser-safe codex run metadata", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
     const response = await dispatch({
       projectPath,
@@ -363,14 +363,24 @@ describe("bridge server", () => {
         startedAt: "2026-07-02T12:00:00.000Z",
         finishedAt: "2026-07-02T12:01:00.000Z",
         exitCode: 0,
-        stdout: runProjectPath,
-        stderr: "",
-        promptPath: ".ui-annotations/tasks/task_001.prompt.md"
+        stdout: `Codex read ${runProjectPath}`,
+        stderr: `Failed in ${runProjectPath}; retry ${runProjectPath}`,
+        promptPath: join(runProjectPath, ".ui-annotations", "tasks", "task_001.prompt.md")
       })
     });
 
     expect(response.statusCode).toBe(201);
-    expect(response.json.run).toMatchObject({ taskId: "task_001", status: "completed", stdout: projectPath });
+    expect(response.json).toEqual({
+      run: {
+        runId: "run_task_001_20260702120000000",
+        status: "completed",
+        stderr: "Failed in [project]; retry [project]"
+      }
+    });
+    expect(JSON.stringify(response.json)).not.toContain(projectPath);
+    expect(response.json.run).not.toHaveProperty("stdout");
+    expect(response.json.run).not.toHaveProperty("command");
+    expect(response.json.run).not.toHaveProperty("promptPath");
   });
 
   it("rejects non-codex agent run requests", async () => {
