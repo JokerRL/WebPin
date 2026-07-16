@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, type FileHandle } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { annotationSchema, createTaskPackage, type Annotation } from "@ui-annotations/shared";
@@ -13,8 +14,11 @@ type AnnotationPatch = {
   [Key in keyof EditableAnnotationFields]?: EditableAnnotationFields[Key] | undefined;
 };
 
-const projectSettingsSchema = z
+const projectIdSchema = z.string().regex(/^project_[a-zA-Z0-9_-]+$/);
+
+const projectFileSchema = z
   .object({
+    projectId: projectIdSchema.optional(),
     screenshotCaptureEnabled: z.boolean().default(false)
   })
   .default({ screenshotCaptureEnabled: false });
@@ -25,7 +29,7 @@ const annotationAssetSchema = z.object({
   dataUrl: z.string().regex(/^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/]+={0,2}$/)
 });
 
-export type ProjectSettings = z.infer<typeof projectSettingsSchema>;
+export type ProjectSettings = Pick<z.infer<typeof projectFileSchema>, "screenshotCaptureEnabled">;
 export type ProjectSettingsPatch = {
   [Key in keyof ProjectSettings]?: ProjectSettings[Key] | undefined;
 };
@@ -210,27 +214,58 @@ async function ensureManagedDirectory(path: string): Promise<void> {
 export async function readProjectSettings(projectPath: string): Promise<ProjectSettings> {
   await ensureAnnotationDirs(projectPath);
   try {
-    return projectSettingsSchema.parse(JSON.parse(await readManagedFile(join(annotationRoot(projectPath), "project.json"))));
+    const projectFile = projectFileSchema.parse(
+      JSON.parse(await readManagedFile(join(annotationRoot(projectPath), "project.json")))
+    );
+    return { screenshotCaptureEnabled: projectFile.screenshotCaptureEnabled };
   } catch (error) {
     if (isFileSystemError(error, "ENOENT")) {
-      return projectSettingsSchema.parse({});
+      return { screenshotCaptureEnabled: false };
     }
     throw error;
   }
+}
+
+export async function ensureProjectIdentity(
+  projectPath: string,
+  idFactory: () => string = () => `project_${randomBytes(16).toString("base64url")}`
+): Promise<string> {
+  await ensureAnnotationDirs(projectPath);
+  const projectFilePath = join(annotationRoot(projectPath), "project.json");
+  let projectFile: z.infer<typeof projectFileSchema>;
+  try {
+    projectFile = projectFileSchema.parse(JSON.parse(await readManagedFile(projectFilePath)));
+  } catch (error) {
+    if (!isFileSystemError(error, "ENOENT")) throw error;
+    projectFile = projectFileSchema.parse({});
+  }
+  if (projectFile.projectId) return projectFile.projectId;
+
+  const projectId = projectIdSchema.parse(idFactory());
+  await writeManagedFile(projectFilePath, `${JSON.stringify({ projectId, ...projectFile }, null, 2)}\n`);
+  return projectId;
 }
 
 export async function updateProjectSettings(
   projectPath: string,
   patch: ProjectSettingsPatch
 ): Promise<ProjectSettings> {
-  const current = await readProjectSettings(projectPath);
-  const settings = projectSettingsSchema.parse({ ...current, ...patch });
-  await writeManagedFile(join(annotationRoot(projectPath), "project.json"), `${JSON.stringify(settings, null, 2)}\n`);
+  await ensureAnnotationDirs(projectPath);
+  const projectFilePath = join(annotationRoot(projectPath), "project.json");
+  let current: z.infer<typeof projectFileSchema>;
+  try {
+    current = projectFileSchema.parse(JSON.parse(await readManagedFile(projectFilePath)));
+  } catch (error) {
+    if (!isFileSystemError(error, "ENOENT")) throw error;
+    current = projectFileSchema.parse({});
+  }
+  const projectFile = projectFileSchema.parse({ ...current, ...patch });
+  await writeManagedFile(projectFilePath, `${JSON.stringify(projectFile, null, 2)}\n`);
   await appendManagedFile(
     join(annotationRoot(projectPath), "events.jsonl"),
     `${JSON.stringify({ type: "project-settings.updated", at: new Date().toISOString(), patch })}\n`
   );
-  return settings;
+  return { screenshotCaptureEnabled: projectFile.screenshotCaptureEnabled };
 }
 
 export async function writeAnnotationAsset(projectPath: string, rawInput: AnnotationAssetInput): Promise<string> {

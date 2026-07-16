@@ -7,7 +7,7 @@ import { createPendingMutationQueue } from "./pending-mutations";
 import { mergeVisualAssetPaths, type VisualAssetPaths } from "./panel/model";
 import {
   accessKeyStorageKey,
-  projectNameStorageKey
+  projectIdStorageKey
 } from "./panel/connection";
 
 const pendingAnnotationsKey = "ui-annotations.pendingAnnotations";
@@ -242,13 +242,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "ui-annotations.saveInlineAnnotation") {
     let requestAccessKey = "";
     chrome.storage.local
-      .get([accessKeyStorageKey, projectNameStorageKey])
+      .get([accessKeyStorageKey, projectIdStorageKey])
       .then(async (result) => {
         const selection = message.selection as SelectedElement;
         const accessKey = String(result[accessKeyStorageKey] ?? "").trim();
         requestAccessKey = accessKey;
-        const projectName = String(result[projectNameStorageKey] ?? "").trim();
-        if (!accessKey || !projectName) {
+        const projectId = String(result[projectIdStorageKey] ?? "").trim();
+        if (!accessKey || !projectId) {
           sendResponse({ ok: false, error: "Connect the bridge in the side panel before saving." });
           return;
         }
@@ -260,7 +260,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         let annotation = createAnnotationFromSelection({
-          projectName,
+          projectId,
           selection,
           note,
           changeType: message.changeType as Annotation["changeType"],

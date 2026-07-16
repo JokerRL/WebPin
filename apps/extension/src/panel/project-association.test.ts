@@ -5,7 +5,7 @@ import { findProjectMismatch } from "./project-association";
 describe("findProjectMismatch", () => {
   it("accepts a batch owned by the authenticated project", () => {
     const annotations = [{ id: "ann_1", projectId: "webpin" }] as Annotation[];
-    expect(findProjectMismatch(annotations, "WebPin")).toBeNull();
+    expect(findProjectMismatch(annotations, "webpin")).toBeNull();
   });
 
   it("returns the first annotation owned by another project", () => {
@@ -13,6 +13,11 @@ describe("findProjectMismatch", () => {
       { id: "ann_1", projectId: "webpin" },
       { id: "ann_2", projectId: "other-project" }
     ] as Annotation[];
-    expect(findProjectMismatch(annotations, "WebPin")?.id).toBe("ann_2");
+    expect(findProjectMismatch(annotations, "webpin")?.id).toBe("ann_2");
+  });
+
+  it("does not let matching display names bypass identity comparison", () => {
+    const annotations = [{ id: "ann_1", projectId: "project_first" }] as Annotation[];
+    expect(findProjectMismatch(annotations, "project_second")?.id).toBe("ann_1");
   });
 });

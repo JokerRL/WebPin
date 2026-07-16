@@ -10,6 +10,7 @@ import {
   createTaskFiles,
   deleteAnnotation,
   ensureAnnotationDirs,
+  ensureProjectIdentity,
   listAnnotations,
   readAgentRun,
   readProjectSettings,
@@ -367,6 +368,45 @@ describe("store", () => {
     expect(settings).toMatchObject({ screenshotCaptureEnabled: true });
     const projectJson = await readFile(join(projectPath, ".ui-annotations", "project.json"), "utf8");
     expect(JSON.parse(projectJson)).toMatchObject({ screenshotCaptureEnabled: true });
+  });
+
+  it("persists distinct opaque identities for projects with the same display name", async () => {
+    const firstParent = await mkdtemp(join(tmpdir(), "ui-annotations-parent-"));
+    const secondParent = await mkdtemp(join(tmpdir(), "ui-annotations-parent-"));
+    const firstProject = join(firstParent, "same-name");
+    const secondProject = join(secondParent, "same-name");
+    await mkdir(firstProject);
+    await mkdir(secondProject);
+
+    await expect(ensureProjectIdentity(firstProject, () => "project_AAAAAAAAAAAAAAAAAAAAAA"))
+      .resolves.toBe("project_AAAAAAAAAAAAAAAAAAAAAA");
+    await expect(ensureProjectIdentity(secondProject, () => "project_BBBBBBBBBBBBBBBBBBBBBB"))
+      .resolves.toBe("project_BBBBBBBBBBBBBBBBBBBBBB");
+    await expect(ensureProjectIdentity(firstProject, () => "project_CCCCCCCCCCCCCCCCCCCCCC"))
+      .resolves.toBe("project_AAAAAAAAAAAAAAAAAAAAAA");
+  });
+
+  it("generates a filename-safe opaque identity by default", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const projectId = await ensureProjectIdentity(projectPath);
+    expect(projectId).toMatch(/^project_[a-zA-Z0-9_-]{22}$/);
+  });
+
+  it("adds identity to legacy settings and preserves it across settings updates", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    await ensureAnnotationDirs(projectPath);
+    await writeFile(
+      join(projectPath, ".ui-annotations", "project.json"),
+      JSON.stringify({ screenshotCaptureEnabled: true }),
+      "utf8"
+    );
+
+    const projectId = await ensureProjectIdentity(projectPath, () => "project_DDDDDDDDDDDDDDDDDDDDDD");
+    await updateProjectSettings(projectPath, { screenshotCaptureEnabled: false });
+
+    expect(projectId).toBe("project_DDDDDDDDDDDDDDDDDDDDDD");
+    expect(JSON.parse(await readFile(join(projectPath, ".ui-annotations", "project.json"), "utf8")))
+      .toEqual({ projectId, screenshotCaptureEnabled: false });
   });
 
   it("writes annotation screenshot and crop assets inside annotation storage", async () => {

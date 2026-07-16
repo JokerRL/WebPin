@@ -31,6 +31,28 @@ type BridgeErrorBody = {
   message?: string;
 };
 
+export type BridgeSession = {
+  ready: true;
+  projectName: string;
+  projectId: string;
+};
+
+function parseSession(value: unknown): BridgeSession {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value as { ready?: unknown }).ready !== true ||
+    typeof (value as { projectName?: unknown }).projectName !== "string" ||
+    !(value as { projectName: string }).projectName.trim() ||
+    typeof (value as { projectId?: unknown }).projectId !== "string" ||
+    !/^project_[a-zA-Z0-9_-]+$/.test((value as { projectId: string }).projectId)
+  ) {
+    throw new BridgeClientError("http", "Invalid session response from bridge.");
+  }
+  return value as BridgeSession;
+}
+
 function invalidJsonResponse(response: Response): BridgeClientError {
   return new BridgeClientError(
     "http",
@@ -95,7 +117,7 @@ export function createBridgeClient({
 
   return {
     getHealth: () => request<{ ok: true; authentication: "access-key" }>("/health", {}, false),
-    getSession: () => request<{ ready: true; projectName: string }>("/session"),
+    getSession: async () => parseSession(await request<unknown>("/session")),
     listAnnotations: () => request<{ annotations: Annotation[] }>("/annotations"),
     createAnnotation: (annotation: Annotation) =>
       request<{ annotation: Annotation }>("/annotations", {

@@ -94,6 +94,7 @@ async function dispatch(input: {
   const handler = createBridgeRequestHandler({
     projectPath: input.projectPath,
     projectName: "test-project",
+    projectId: "project_server_test",
     accessKey,
     allowedOrigins: input.allowedOrigins ?? ["chrome-extension://*"],
     ...(input.runCodexTask ? { runCodexTask: input.runCodexTask } : {})
@@ -136,7 +137,11 @@ describe("bridge server", () => {
     const response = await dispatch({ projectPath, method: "GET", url: "/session" });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json).toEqual({ ready: true, projectName: "test-project" });
+    expect(response.json).toEqual({
+      ready: true,
+      projectName: "test-project",
+      projectId: "project_server_test"
+    });
     expect(JSON.stringify(response.json)).not.toContain(projectPath);
     expect(JSON.stringify(response.json)).not.toContain(accessKey);
   });

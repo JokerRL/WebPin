@@ -11,6 +11,7 @@ import {
   createTaskFiles,
   deleteAnnotation,
   ensureAnnotationDirs,
+  ensureProjectIdentity,
   listAnnotations,
   readProjectSettings,
   updateAnnotation,
@@ -167,6 +168,7 @@ function browserSafeAgentRun(run: Awaited<ReturnType<typeof defaultRunCodexTask>
 }
 
 export type BridgeOptions = BridgeConfig & {
+  projectId: string;
   allowedOrigins?: string[];
   runCodexTask?: typeof defaultRunCodexTask;
 };
@@ -176,7 +178,7 @@ export function createBridgeServer(options: BridgeOptions) {
 }
 
 export function createBridgeRequestHandler(options: BridgeOptions) {
-  const { accessKey, projectName, projectPath } = options;
+  const { accessKey, projectId, projectName, projectPath } = options;
   const allowedOrigins = options.allowedOrigins ?? defaultAllowedOrigins();
   const runCodexTask = options.runCodexTask ?? defaultRunCodexTask;
 
@@ -209,7 +211,7 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/session") {
-        sendJson(response, 200, { ready: true, projectName });
+        sendJson(response, 200, { ready: true, projectName, projectId });
         return;
       }
 
@@ -295,7 +297,8 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = await loadBridgeConfig();
   await ensureAnnotationDirs(config.projectPath);
-  createBridgeServer(config).listen(port, host, () => {
+  const projectId = await ensureProjectIdentity(config.projectPath);
+  createBridgeServer({ ...config, projectId }).listen(port, host, () => {
     console.log(`ui-annotations bridge listening at http://${host}:${port}`);
     console.log(`project: ${config.projectName}`);
     console.log(`access key: ${config.accessKey}`);

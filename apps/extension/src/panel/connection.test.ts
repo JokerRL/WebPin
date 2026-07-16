@@ -4,6 +4,7 @@ import {
   legacyProjectPathStorageKey,
   nextConnectionState,
   projectNameStorageKey,
+  projectIdStorageKey,
   storageKeysToRemoveAfterAuthFailure
 } from "./connection";
 
@@ -24,8 +25,12 @@ describe("nextConnectionState", () => {
 
   it("reports ready only after session verification", () => {
     expect(
-      nextConnectionState({ health: "online", accessKey: "key", session: { projectName: "WebPin" } })
-    ).toEqual({ status: "ready", projectName: "WebPin" });
+      nextConnectionState({
+        health: "online",
+        accessKey: "key",
+        session: { projectName: "WebPin", projectId: "project_webpin" }
+      })
+    ).toEqual({ status: "ready", projectName: "WebPin", projectId: "project_webpin" });
   });
 });
 
@@ -34,10 +39,15 @@ describe("connection storage keys", () => {
     expect(accessKeyStorageKey).toBe("ui-annotations.accessKey");
     expect(legacyProjectPathStorageKey).toBe("ui-annotations.projectPath");
     expect(projectNameStorageKey).toBe("ui-annotations.projectName");
+    expect(projectIdStorageKey).toBe("ui-annotations.projectId");
   });
 
   it("clears credentials and project name without touching pending annotations", () => {
-    expect(storageKeysToRemoveAfterAuthFailure()).toEqual([accessKeyStorageKey, projectNameStorageKey]);
+    expect(storageKeysToRemoveAfterAuthFailure()).toEqual([
+      accessKeyStorageKey,
+      projectNameStorageKey,
+      projectIdStorageKey
+    ]);
     expect(storageKeysToRemoveAfterAuthFailure()).not.toContain("ui-annotations.pendingAnnotations");
     expect(storageKeysToRemoveAfterAuthFailure()).not.toContain(legacyProjectPathStorageKey);
   });

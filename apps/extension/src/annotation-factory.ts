@@ -1,12 +1,8 @@
 import type { Annotation } from "@ui-annotations/shared";
 import type { SelectedElement } from "./content";
 
-export function projectIdFromName(projectName: string): string {
-  return projectName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-}
-
 export function createAnnotationFromSelection(input: {
-  projectName: string;
+  projectId: string;
   selection: SelectedElement;
   note: string;
   changeType: Annotation["changeType"];
@@ -20,7 +16,7 @@ export function createAnnotationFromSelection(input: {
 
   return {
     id,
-    projectId: projectIdFromName(input.projectName),
+    projectId: input.projectId,
     page: {
       url: input.selection.url,
       ...(input.selection.route ? { route: input.selection.route } : {}),

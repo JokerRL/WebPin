@@ -18,6 +18,7 @@ import { getPanelLanguage, panelText } from "./i18n";
 import {
   accessKeyStorageKey,
   legacyProjectPathStorageKey,
+  projectIdStorageKey,
   projectNameStorageKey,
   type ConnectionState
 } from "./connection";
@@ -40,6 +41,7 @@ export function App() {
   const [accessKeyInput, setAccessKeyInput] = useState("");
   const [activeAccessKey, setActiveAccessKey] = useState("");
   const [projectName, setProjectName] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [selection, setSelection] = useState<SelectedElement | null>(null);
   const [note, setNote] = useState("");
   const [changeType, setChangeType] = useState<Annotation["changeType"]>("layout");
@@ -81,6 +83,7 @@ export function App() {
     setAccessKeyInput("");
     setActiveAccessKey("");
     setProjectName("");
+    setProjectId("");
     setConnection({ status: "key-required" });
     return true;
   };
@@ -183,6 +186,7 @@ export function App() {
       selectionKey,
       accessKeyStorageKey,
       projectNameStorageKey,
+      projectIdStorageKey,
       modeKey,
       screenshotCaptureEnabledKey
     ], (result) => {
@@ -213,10 +217,16 @@ export function App() {
           try {
             const session = await client.getSession();
             if (!attemptGateRef.current.isLatest(startupAttempt)) return;
-            setConnection({ status: "ready", projectName: session.projectName });
+            await chrome.storage.local.set({
+              [projectNameStorageKey]: session.projectName,
+              [projectIdStorageKey]: session.projectId
+            });
+            if (!attemptGateRef.current.isLatest(startupAttempt)) return;
+            setConnection({ status: "ready", projectName: session.projectName, projectId: session.projectId });
             activeAccessKeyRef.current = storedAccessKey;
             setActiveAccessKey(storedAccessKey);
             setProjectName(session.projectName);
+            setProjectId(session.projectId);
             const shouldApply = () => attemptGateRef.current.isLatest(startupAttempt);
             await Promise.all([loadSavedAnnotations(client, shouldApply), loadProjectSettings(client, shouldApply)]);
             if (!attemptGateRef.current.isLatest(startupAttempt)) return;
@@ -256,6 +266,7 @@ export function App() {
         activeAccessKeyRef.current = "";
         setActiveAccessKey("");
         setProjectName("");
+        setProjectId("");
         setConnection({ status: "key-required" });
       }
     };
@@ -307,7 +318,8 @@ export function App() {
       if (!attemptGateRef.current.isLatest(attempt)) return;
       await chrome.storage.local.set({
         [accessKeyStorageKey]: accessKey,
-        [projectNameStorageKey]: session.projectName
+        [projectNameStorageKey]: session.projectName,
+        [projectIdStorageKey]: session.projectId
       });
       if (!attemptGateRef.current.isLatest(attempt)) return;
       await chrome.storage.local.remove(legacyProjectPathStorageKey);
@@ -315,7 +327,8 @@ export function App() {
       setActiveAccessKey(accessKey);
       activeAccessKeyRef.current = accessKey;
       setProjectName(session.projectName);
-      setConnection({ status: "ready", projectName: session.projectName });
+      setProjectId(session.projectId);
+      setConnection({ status: "ready", projectName: session.projectName, projectId: session.projectId });
       const shouldApply = () => attemptGateRef.current.isLatest(attempt);
       await Promise.all([loadSavedAnnotations(client, shouldApply), loadProjectSettings(client, shouldApply)]);
       if (!attemptGateRef.current.isLatest(attempt)) return;
@@ -370,7 +383,7 @@ export function App() {
       return;
     }
 
-    if (connection.status !== "ready" || !projectName) {
+    if (connection.status !== "ready" || !projectId) {
       setSaveState("error");
       setMessage(t.messages.accessKeyRejected);
       return;
@@ -385,7 +398,7 @@ export function App() {
     setSaveState("saving");
     setMessage("");
     let annotation = createAnnotationFromSelection({
-      projectName,
+      projectId,
       selection,
       note: note.trim(),
       changeType,
@@ -490,7 +503,7 @@ export function App() {
       return;
     }
 
-    const mismatch = findProjectMismatch(pendingAnnotations, projectName);
+    const mismatch = findProjectMismatch(pendingAnnotations, connection.projectId);
     if (mismatch) {
       setSaveState("error");
       setMessage(t.messages.pendingProjectMismatch);

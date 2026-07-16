@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createAnnotationFromSelection } from "./annotation-factory";
 
 describe("createAnnotationFromSelection", () => {
-  it("uses the authenticated project name and preserves DOM and visual anchors", () => {
+  it("uses the exact authenticated project identity and preserves DOM and visual anchors", () => {
     const annotation = createAnnotationFromSelection({
-      projectName: "WebPin",
+      projectId: "project_AbCdEf0123_-opaque",
       selection: {
         url: "http://localhost/settings",
         route: "/settings",
@@ -21,7 +21,7 @@ describe("createAnnotationFromSelection", () => {
       targetPlatforms: ["web"]
     });
 
-    expect(annotation.projectId).toBe("webpin");
+    expect(annotation.projectId).toBe("project_AbCdEf0123_-opaque");
     expect(annotation.anchor.dom).toMatchObject({
       selector: "[data-testid=save]",
       xpath: "/html/body/button",

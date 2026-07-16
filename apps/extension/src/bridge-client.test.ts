@@ -38,7 +38,7 @@ async function captureBridgeClientError(request: Promise<unknown>): Promise<Brid
 describe("createBridgeClient", () => {
   it("adds the access key to protected requests", async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ ready: true, projectName: "WebPin" }), {
+      new Response(JSON.stringify({ ready: true, projectName: "WebPin", projectId: "project_webpin_test" }), {
         status: 200,
         headers: { "content-type": "application/json" }
       })
@@ -74,6 +74,33 @@ describe("createBridgeClient", () => {
     );
 
     expect(error).toMatchObject({ kind: "auth", message: "Access key rejected." });
+  });
+
+  it("accepts a valid verified session response", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ready: true,
+      projectName: "WebPin",
+      projectId: "project_AbCdEf0123_-opaque"
+    })));
+
+    await expect(createBridgeClient({ accessKey: "secret", fetcher }).getSession()).resolves.toEqual({
+      ready: true,
+      projectName: "WebPin",
+      projectId: "project_AbCdEf0123_-opaque"
+    });
+  });
+
+  it.each([
+    ["missing projectId", { ready: true, projectName: "WebPin" }],
+    ["malformed projectId", { ready: true, projectName: "WebPin", projectId: "../WebPin" }],
+    ["false ready state", { ready: false, projectName: "WebPin", projectId: "project_valid" }],
+    ["empty project name", { ready: true, projectName: "", projectId: "project_valid" }]
+  ])("rejects a session with %s as an HTTP protocol error", async (_label, body) => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body)));
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "secret", fetcher }).getSession()
+    );
+    expect(error.kind).toBe("http");
   });
 
   it("normalizes a fetch failure as an offline error", async () => {

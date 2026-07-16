@@ -10,6 +10,7 @@ const bridgeHost = "127.0.0.1";
 const bridgePort = 48731;
 const sampleHost = "127.0.0.1";
 const accessKey = "extension-e2e-key";
+const projectId = "project_extension_e2e";
 const note = "Make the save button taller.";
 const taskId = "task-extension-e2e";
 const userIntent = note;
@@ -90,6 +91,7 @@ async function run() {
     bridgeServer = createBridgeServer({
       accessKey,
       projectName: "extension-e2e-project",
+      projectId,
       projectPath,
       allowedOrigins: ["chrome-extension://*"]
     });
@@ -151,7 +153,12 @@ async function run() {
       isBridgeResponse(response, "GET", "/session", 200)
     );
     await panelPage.getByRole("button", { name: /^(Connect|连接)$/ }).click();
-    await sessionResponse;
+    const verifiedSessionResponse = await sessionResponse;
+    assert.deepEqual(await verifiedSessionResponse.json(), {
+      ready: true,
+      projectName: "extension-e2e-project",
+      projectId
+    });
     await panelPage.getByRole("status").filter({ hasText: /Bridge: Ready|桥接服务：已就绪/ }).waitFor();
 
     const samplePage = await context.newPage();
@@ -194,6 +201,7 @@ async function run() {
     let annotationHistory = await readAnnotationHistory(projectPath);
     const createdAnnotation = annotationHistory.find((annotation) => annotation.note === note);
     assert.ok(createdAnnotation, "annotations.jsonl should contain the note saved through the packaged extension.");
+    assert.equal(createdAnnotation.projectId, projectId, "The annotation should use the bridge-owned project identity.");
     const annotationId = createdAnnotation.id;
 
     const statusSelect = panelPage.getByRole("combobox", {
@@ -232,7 +240,12 @@ async function run() {
     await panelPage.getByLabel(/Acceptance criteria|验收标准/).fill(acceptanceCriterion);
     const taskPost = panelPage.waitForResponse((response) => isBridgeResponse(response, "POST", "/tasks", 201));
     await panelPage.getByRole("button", { name: /Generate task files|生成任务文件/ }).click();
-    await taskPost;
+    const taskResponse = await taskPost;
+    assert.equal(
+      taskResponse.request().postDataJSON().annotations[0].projectId,
+      projectId,
+      "The task source annotation should retain the bridge-owned project identity."
+    );
 
     const taskFiles = await readdir(join(projectPath, ".ui-annotations", "tasks"));
     assert.deepEqual(
