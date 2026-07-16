@@ -31,6 +31,13 @@ type BridgeErrorBody = {
   message?: string;
 };
 
+function invalidJsonResponse(response: Response): BridgeClientError {
+  return new BridgeClientError(
+    "http",
+    `Invalid JSON response from bridge (status ${response.status}).`
+  );
+}
+
 export function createBridgeClient({
   accessKey,
   fetcher = fetch,
@@ -55,7 +62,24 @@ export function createBridgeClient({
       throw new BridgeClientError("offline", error instanceof Error ? error.message : String(error));
     }
 
-    const body = (await response.json().catch(() => ({}))) as BridgeErrorBody;
+    let parsedBody: unknown;
+    try {
+      parsedBody = await response.json();
+    } catch {
+      if (response.status === 401) {
+        throw new BridgeClientError("auth", "Access key rejected.");
+      }
+      throw invalidJsonResponse(response);
+    }
+
+    if (parsedBody === null || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+      if (response.status === 401) {
+        throw new BridgeClientError("auth", "Access key rejected.");
+      }
+      throw invalidJsonResponse(response);
+    }
+
+    const body = parsedBody as BridgeErrorBody;
     if (response.status === 401 || body.error === "invalid_access_key") {
       throw new BridgeClientError("auth", body.message ?? "Access key rejected.");
     }

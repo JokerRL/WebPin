@@ -1,5 +1,39 @@
 import { describe, expect, it, vi } from "vitest";
-import { createBridgeClient } from "./bridge-client";
+import type { Annotation } from "@ui-annotations/shared";
+import { BridgeClientError, createBridgeClient } from "./bridge-client";
+
+const representativeAnnotation = {
+  id: "ann_001",
+  projectId: "webpin",
+  page: {
+    url: "http://localhost:3000/settings",
+    route: "/settings",
+    title: "Settings",
+    viewport: { width: 1440, height: 900, deviceScaleFactor: 1 }
+  },
+  anchor: {
+    visual: {
+      boundingBox: { x: 100, y: 200, width: 240, height: 48 }
+    }
+  },
+  note: "Align the control with the form fields.",
+  changeType: "layout",
+  priority: "medium",
+  status: "open",
+  targetPlatforms: ["web"],
+  createdAt: "2026-07-16T00:00:00.000Z",
+  updatedAt: "2026-07-16T00:00:00.000Z"
+} satisfies Annotation;
+
+async function captureBridgeClientError(request: Promise<unknown>): Promise<BridgeClientError> {
+  try {
+    await request;
+    throw new Error("Expected bridge request to reject.");
+  } catch (error) {
+    expect(error).toBeInstanceOf(BridgeClientError);
+    return error as BridgeClientError;
+  }
+}
 
 describe("createBridgeClient", () => {
   it("adds the access key to protected requests", async () => {
@@ -35,9 +69,11 @@ describe("createBridgeClient", () => {
       new Response(JSON.stringify({ error: "invalid_access_key" }), { status: 401 })
     );
 
-    await expect(createBridgeClient({ accessKey: "old", fetcher }).getSession()).rejects.toMatchObject({
-      kind: "auth"
-    });
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "old", fetcher }).getSession()
+    );
+
+    expect(error).toMatchObject({ kind: "auth", message: "Access key rejected." });
   });
 
   it("normalizes a fetch failure as an offline error", async () => {
@@ -45,14 +81,16 @@ describe("createBridgeClient", () => {
       throw new TypeError("fetch failed");
     });
 
-    await expect(createBridgeClient({ accessKey: "secret", fetcher }).getHealth()).rejects.toMatchObject({
-      kind: "offline"
-    });
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "secret", fetcher }).getHealth()
+    );
+
+    expect(error).toMatchObject({ kind: "offline", message: "fetch failed" });
   });
 
   it("preserves target platforms in annotation update patches", async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ annotation: {} }), { status: 200 })
+      new Response(JSON.stringify({ annotation: representativeAnnotation }), { status: 200 })
     );
 
     await createBridgeClient({ accessKey: "secret", fetcher }).updateAnnotation("ann_001", {
@@ -66,5 +104,41 @@ describe("createBridgeClient", () => {
         body: JSON.stringify({ patch: { targetPlatforms: ["web"] } })
       })
     );
+  });
+
+  it.each([
+    ["malformed JSON", () => new Response("{")],
+    ["JSON null", () => new Response("null")],
+    ["an empty body", () => new Response()]
+  ])("normalizes a successful response with %s as an HTTP protocol error", async (_label, response) => {
+    const fetcher = vi.fn<typeof fetch>(async () => response());
+
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "secret", fetcher }).getSession()
+    );
+
+    expect(error.kind).toBe("http");
+    expect(error.message).toMatch(/invalid JSON response/i);
+  });
+
+  it("normalizes a malformed error response as an HTTP protocol error", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response("{", { status: 500 }));
+
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "secret", fetcher }).getSession()
+    );
+
+    expect(error.kind).toBe("http");
+    expect(error.message).toMatch(/invalid JSON response/i);
+  });
+
+  it("keeps a malformed 401 response classified as auth", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response("{", { status: 401 }));
+
+    const error = await captureBridgeClientError(
+      createBridgeClient({ accessKey: "old", fetcher }).getSession()
+    );
+
+    expect(error).toMatchObject({ kind: "auth", message: "Access key rejected." });
   });
 });
