@@ -159,12 +159,10 @@ function allowedOriginsHeader(request: IncomingMessage, allowedOrigins: string[]
   return origin && isAllowedOrigin(origin, allowedOrigins) ? origin : undefined;
 }
 
-function browserSafeAgentRun(run: Awaited<ReturnType<typeof defaultRunCodexTask>>, projectPath: string) {
-  const stderr = run.stderr.split(projectPath).join("[project]");
+function browserSafeAgentRun(run: Awaited<ReturnType<typeof defaultRunCodexTask>>) {
   return {
     runId: run.runId,
-    status: run.status,
-    ...(stderr ? { stderr } : {})
+    status: run.status
   };
 }
 
@@ -283,7 +281,7 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
       if (request.method === "POST" && requestUrl.pathname === "/agent-runs") {
         const body = agentRunsRequestSchema.parse(await readJson(request));
         const run = await runCodexTask(projectPath, { taskId: body.taskId });
-        sendJson(response, 201, { run: browserSafeAgentRun(run, projectPath) });
+        sendJson(response, 201, { run: browserSafeAgentRun(run) });
         return;
       }
 

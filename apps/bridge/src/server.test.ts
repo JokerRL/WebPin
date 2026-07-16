@@ -347,40 +347,44 @@ describe("bridge server", () => {
     expect(invalid.json).toMatchObject({ error: "invalid_schema" });
   });
 
-  it("returns only sanitized browser-safe codex run metadata", async () => {
+  it("returns only browser-safe codex run metadata", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
-    const response = await dispatch({
+    const arbitraryOutput = [
       projectPath,
-      method: "POST",
-      url: "/agent-runs",
-      body: JSON.stringify({ taskId: "task_001", agent: "codex" }),
-      runCodexTask: async (runProjectPath, input) => ({
-        runId: "run_task_001_20260702120000000",
-        taskId: input.taskId,
-        agent: "codex",
-        status: "completed",
-        command: ["codex", "exec", "--sandbox", "workspace-write", "Read task."],
-        startedAt: "2026-07-02T12:00:00.000Z",
-        finishedAt: "2026-07-02T12:01:00.000Z",
-        exitCode: 0,
-        stdout: `Codex read ${runProjectPath}`,
-        stderr: `Failed in ${runProjectPath}; retry ${runProjectPath}`,
-        promptPath: join(runProjectPath, ".ui-annotations", "tasks", "task_001.prompt.md")
-      })
-    });
+      encodeURIComponent(projectPath),
+      "access_token=server-secret-credential",
+      "x".repeat(10_000)
+    ].join("\n");
 
-    expect(response.statusCode).toBe(201);
-    expect(response.json).toEqual({
-      run: {
-        runId: "run_task_001_20260702120000000",
-        status: "completed",
-        stderr: "Failed in [project]; retry [project]"
-      }
-    });
-    expect(JSON.stringify(response.json)).not.toContain(projectPath);
-    expect(response.json.run).not.toHaveProperty("stdout");
-    expect(response.json.run).not.toHaveProperty("command");
-    expect(response.json.run).not.toHaveProperty("promptPath");
+    for (const status of ["completed", "failed"] as const) {
+      const response = await dispatch({
+        projectPath,
+        method: "POST",
+        url: "/agent-runs",
+        body: JSON.stringify({ taskId: "task_001", agent: "codex" }),
+        runCodexTask: async (runProjectPath, input) => ({
+          runId: `run_task_001_${status}`,
+          taskId: input.taskId,
+          agent: "codex",
+          status,
+          command: ["codex", "exec", "--sandbox", "workspace-write", arbitraryOutput],
+          startedAt: "2026-07-02T12:00:00.000Z",
+          finishedAt: "2026-07-02T12:01:00.000Z",
+          exitCode: status === "completed" ? 0 : 1,
+          stdout: `stdout:${runProjectPath}:${arbitraryOutput}`,
+          stderr: `stderr:${runProjectPath}:${arbitraryOutput}`,
+          promptPath: join(runProjectPath, ".ui-annotations", "tasks", "task_001.prompt.md")
+        })
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json).toEqual({
+        run: {
+          runId: `run_task_001_${status}`,
+          status
+        }
+      });
+    }
   });
 
   it("rejects non-codex agent run requests", async () => {
