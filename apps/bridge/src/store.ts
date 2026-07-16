@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { annotationSchema, createTaskPackage, type Annotation } from "@ui-annotations/shared";
@@ -99,11 +99,40 @@ function assertInside(parent: string, child: string): string {
 
 export async function ensureAnnotationDirs(projectPath: string): Promise<void> {
   const root = annotationRoot(projectPath);
-  await mkdir(join(root, "tasks"), { recursive: true });
-  await mkdir(join(root, "runs"), { recursive: true });
-  await mkdir(join(root, "assets", "screenshots"), { recursive: true });
-  await mkdir(join(root, "assets", "crops"), { recursive: true });
-  await mkdir(join(root, "assets", "dom-snapshots"), { recursive: true });
+  const assets = join(root, "assets");
+  const directories = [
+    root,
+    join(root, "tasks"),
+    join(root, "runs"),
+    assets,
+    join(assets, "screenshots"),
+    join(assets, "crops"),
+    join(assets, "dom-snapshots")
+  ];
+
+  for (const directory of directories) {
+    await ensureManagedDirectory(directory);
+  }
+}
+
+async function ensureManagedDirectory(path: string): Promise<void> {
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+    await mkdir(path);
+    stats = await lstat(path);
+  }
+
+  if (stats.isSymbolicLink()) {
+    throw new Error("managed annotation directory must not be a symbolic link");
+  }
+  if (!stats.isDirectory()) {
+    throw new Error("managed annotation path must be a directory");
+  }
 }
 
 export async function readProjectSettings(projectPath: string): Promise<ProjectSettings> {

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import {
   appendAnnotation,
   createTaskFiles,
   deleteAnnotation,
+  ensureAnnotationDirs,
   listAnnotations,
   readAgentRun,
   readProjectSettings,
@@ -44,6 +45,28 @@ const annotation = {
 } as const;
 
 describe("store", () => {
+  it("rejects a symbolic-link annotation root", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outsidePath = await mkdtemp(join(tmpdir(), "ui-annotations-outside-"));
+    await symlink(outsidePath, join(projectPath, ".ui-annotations"));
+
+    await expect(ensureAnnotationDirs(projectPath)).rejects.toThrow(
+      "managed annotation directory must not be a symbolic link"
+    );
+  });
+
+  it("rejects a symbolic-link managed subdirectory", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const outsidePath = await mkdtemp(join(tmpdir(), "ui-annotations-outside-"));
+    const annotationPath = join(projectPath, ".ui-annotations");
+    await mkdir(annotationPath);
+    await symlink(outsidePath, join(annotationPath, "tasks"));
+
+    await expect(ensureAnnotationDirs(projectPath)).rejects.toThrow(
+      "managed annotation directory must not be a symbolic link"
+    );
+  });
+
   it("appends validated annotations as jsonl", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
     await appendAnnotation(projectPath, annotation);
