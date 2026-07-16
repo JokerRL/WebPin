@@ -6,7 +6,10 @@ type PanelCopy = {
   shortcut: string;
   mode: (mode: string) => string;
   browseMode: string;
-  projectPath: string;
+  accessKey: string;
+  accessKeyPlaceholder: string;
+  connectBridge: string;
+  connectionStatuses: Record<"offline" | "key-required" | "ready", string>;
   screenshotCaptureTitle: string;
   screenshotCaptureDescription: string;
   selectedElement: string;
@@ -59,43 +62,38 @@ type PanelCopy = {
   saving: string;
   addToPendingList: string;
   messages: {
+    accessKeyRejected: string;
+    bridgeOffline: string;
+    bridgeReady: (projectName: string) => string;
     clickElement: string;
     couldNotStartSelection: string;
-    enterProjectPathBeforeScreenshot: string;
     updatingProjectSettings: string;
     couldNotUpdateProjectSettings: string;
     screenshotEnabled: string;
     screenshotDisabled: string;
     selectElementFirst: string;
-    enterProjectPathForAnnotations: string;
     writeNoteBeforeSaving: string;
     capturingScreenshotAssets: string;
     couldNotCaptureScreenshotAssets: string;
     addedToPending: (annotationId: string) => string;
-    enterProjectPathBeforeRefreshing: string;
     loadingSavedAnnotations: string;
     savedAnnotationsLoaded: string;
-    enterProjectPathBeforeUpdating: string;
     updatingAnnotation: (annotationId: string) => string;
     couldNotUpdateAnnotation: (annotationId: string) => string;
     updatedAnnotation: (annotationId: string) => string;
-    enterProjectPathBeforeDeleting: string;
     deletingAnnotation: (annotationId: string) => string;
     couldNotDeleteAnnotation: (annotationId: string) => string;
     deletedAnnotation: (annotationId: string) => string;
-    enterProjectPathBeforeSavingList: string;
     noPendingAnnotations: string;
     savingAnnotations: (count: number) => string;
     bridgeRejected: (annotationId: string) => string;
     savedAnnotationsToFiles: (count: number) => string;
     selectSavedForTask: string;
     selectSavedBeforeTemplate: string;
-    enterProjectPathBeforeTask: string;
     taskFieldsRequired: string;
     generatingTask: (taskId: string) => string;
     couldNotGenerateTask: (taskId: string) => string;
     generatedTask: (taskPath: string) => string;
-    enterProjectPathBeforeCodex: string;
     generateBeforeCodex: string;
     sendingToCodex: (taskId: string) => string;
     couldNotSendToCodex: (taskId: string) => string;
@@ -114,7 +112,14 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
     shortcut: "macOS: Ctrl+Shift+Y / ⌃⇧Y",
     mode: (mode) => `Mode: ${mode}`,
     browseMode: "browse",
-    projectPath: "Project path",
+    accessKey: "Access key",
+    accessKeyPlaceholder: "Paste the key printed by the bridge",
+    connectBridge: "Connect",
+    connectionStatuses: {
+      offline: "Bridge offline",
+      "key-required": "Key required",
+      ready: "Ready"
+    },
     screenshotCaptureTitle: "Capture screenshot and crop",
     screenshotCaptureDescription: "Saved locally under .ui-annotations/assets when enabled.",
     selectedElement: "Selected element",
@@ -193,43 +198,38 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
     saving: "Saving...",
     addToPendingList: "Add to pending list",
     messages: {
+      accessKeyRejected: "Access key rejected.",
+      bridgeOffline: "Bridge offline.",
+      bridgeReady: (projectName) => `Bridge ready for ${projectName}.`,
       clickElement: "Click one element on the page.",
       couldNotStartSelection: "Could not start selection on the active tab.",
-      enterProjectPathBeforeScreenshot: "Enter the local project path before changing screenshot capture.",
       updatingProjectSettings: "Updating project settings...",
       couldNotUpdateProjectSettings: "Could not update project settings.",
       screenshotEnabled: "Screenshot capture enabled.",
       screenshotDisabled: "Screenshot capture disabled.",
       selectElementFirst: "Select an element on the page first.",
-      enterProjectPathForAnnotations: "Enter the local project path that should receive .ui-annotations.",
       writeNoteBeforeSaving: "Write a note before saving.",
       capturingScreenshotAssets: "Capturing screenshot assets...",
       couldNotCaptureScreenshotAssets: "Could not capture screenshot assets.",
       addedToPending: (annotationId) => `Added ${annotationId} to pending list`,
-      enterProjectPathBeforeRefreshing: "Enter the local project path before refreshing.",
       loadingSavedAnnotations: "Loading saved annotations...",
       savedAnnotationsLoaded: "Saved annotations loaded.",
-      enterProjectPathBeforeUpdating: "Enter the local project path before updating an annotation.",
       updatingAnnotation: (annotationId) => `Updating ${annotationId}...`,
       couldNotUpdateAnnotation: (annotationId) => `Could not update ${annotationId}.`,
       updatedAnnotation: (annotationId) => `Updated ${annotationId}.`,
-      enterProjectPathBeforeDeleting: "Enter the local project path before deleting an annotation.",
       deletingAnnotation: (annotationId) => `Deleting ${annotationId}...`,
       couldNotDeleteAnnotation: (annotationId) => `Could not delete ${annotationId}.`,
       deletedAnnotation: (annotationId) => `Deleted ${annotationId}.`,
-      enterProjectPathBeforeSavingList: "Enter the local project path before saving the list.",
       noPendingAnnotations: "No pending annotations to save.",
       savingAnnotations: (count) => `Saving ${count} annotations...`,
       bridgeRejected: (annotationId) => `Bridge rejected ${annotationId}.`,
       savedAnnotationsToFiles: (count) => `Saved ${count} annotations to .ui-annotations`,
       selectSavedForTask: "Select at least one saved annotation for the task package.",
       selectSavedBeforeTemplate: "Select at least one saved annotation before applying a template.",
-      enterProjectPathBeforeTask: "Enter the local project path before generating a task package.",
       taskFieldsRequired: "Task ID, user intent, and acceptance criteria are required.",
       generatingTask: (taskId) => `Generating ${taskId}...`,
       couldNotGenerateTask: (taskId) => `Could not generate ${taskId}.`,
       generatedTask: (taskPath) => `Generated ${taskPath}.`,
-      enterProjectPathBeforeCodex: "Enter the local project path before sending to Codex.",
       generateBeforeCodex: "Generate task files before sending to Codex.",
       sendingToCodex: (taskId) => `Sending ${taskId} to Codex...`,
       couldNotSendToCodex: (taskId) => `Could not send ${taskId} to Codex.`,
@@ -246,7 +246,14 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
     shortcut: "macOS：Ctrl+Shift+Y / ⌃⇧Y",
     mode: (mode) => `模式：${mode}`,
     browseMode: "浏览",
-    projectPath: "项目路径",
+    accessKey: "访问密钥",
+    accessKeyPlaceholder: "粘贴 bridge 启动时显示的密钥",
+    connectBridge: "连接",
+    connectionStatuses: {
+      offline: "Bridge 离线",
+      "key-required": "需要密钥",
+      ready: "已就绪"
+    },
     screenshotCaptureTitle: "保存截图和裁剪图",
     screenshotCaptureDescription: "开启后会保存到本地 .ui-annotations/assets。",
     selectedElement: "已选元素",
@@ -325,43 +332,38 @@ export const panelText: Record<PanelLanguage, PanelCopy> = {
     saving: "保存中...",
     addToPendingList: "加入待保存列表",
     messages: {
+      accessKeyRejected: "访问密钥被拒绝。",
+      bridgeOffline: "Bridge 离线。",
+      bridgeReady: (projectName) => `Bridge 已为 ${projectName} 就绪。`,
       clickElement: "请在页面中点击一个元素。",
       couldNotStartSelection: "无法在当前标签页开始选择。",
-      enterProjectPathBeforeScreenshot: "请先填写本地项目路径，再修改截图设置。",
       updatingProjectSettings: "正在更新项目设置...",
       couldNotUpdateProjectSettings: "无法更新项目设置。",
       screenshotEnabled: "已开启截图保存。",
       screenshotDisabled: "已关闭截图保存。",
       selectElementFirst: "请先在页面中选择一个元素。",
-      enterProjectPathForAnnotations: "请填写要写入 .ui-annotations 的本地项目路径。",
       writeNoteBeforeSaving: "保存前请先填写备注。",
       capturingScreenshotAssets: "正在保存截图资源...",
       couldNotCaptureScreenshotAssets: "无法保存截图资源。",
       addedToPending: (annotationId) => `已将 ${annotationId} 加入待保存列表`,
-      enterProjectPathBeforeRefreshing: "刷新前请先填写本地项目路径。",
       loadingSavedAnnotations: "正在加载已保存标注...",
       savedAnnotationsLoaded: "已加载保存的标注。",
-      enterProjectPathBeforeUpdating: "更新标注前请先填写本地项目路径。",
       updatingAnnotation: (annotationId) => `正在更新 ${annotationId}...`,
       couldNotUpdateAnnotation: (annotationId) => `无法更新 ${annotationId}。`,
       updatedAnnotation: (annotationId) => `已更新 ${annotationId}。`,
-      enterProjectPathBeforeDeleting: "删除标注前请先填写本地项目路径。",
       deletingAnnotation: (annotationId) => `正在删除 ${annotationId}...`,
       couldNotDeleteAnnotation: (annotationId) => `无法删除 ${annotationId}。`,
       deletedAnnotation: (annotationId) => `已删除 ${annotationId}。`,
-      enterProjectPathBeforeSavingList: "保存列表前请先填写本地项目路径。",
       noPendingAnnotations: "没有待保存的标注。",
       savingAnnotations: (count) => `正在保存 ${count} 条标注...`,
       bridgeRejected: (annotationId) => `桥接服务拒绝了 ${annotationId}。`,
       savedAnnotationsToFiles: (count) => `已将 ${count} 条标注保存到 .ui-annotations`,
       selectSavedForTask: "请至少选择一条已保存标注来生成任务包。",
       selectSavedBeforeTemplate: "应用模板前请至少选择一条已保存标注。",
-      enterProjectPathBeforeTask: "生成任务包前请先填写本地项目路径。",
       taskFieldsRequired: "任务 ID、用户意图和验收标准都是必填项。",
       generatingTask: (taskId) => `正在生成 ${taskId}...`,
       couldNotGenerateTask: (taskId) => `无法生成 ${taskId}。`,
       generatedTask: (taskPath) => `已生成 ${taskPath}。`,
-      enterProjectPathBeforeCodex: "发送给 Codex 前请先填写本地项目路径。",
       generateBeforeCodex: "请先生成任务文件，再发送给 Codex。",
       sendingToCodex: (taskId) => `正在将 ${taskId} 发送给 Codex...`,
       couldNotSendToCodex: (taskId) => `无法将 ${taskId} 发送给 Codex。`,

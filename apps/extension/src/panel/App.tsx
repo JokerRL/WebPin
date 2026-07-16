@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Annotation } from "@ui-annotations/shared";
 import type { SelectedElement } from "../content";
-import { inferProjectPathFromPageUrl } from "../project-path";
+import { createAnnotationFromSelection } from "../annotation-factory";
+import { BridgeClientError, createBridgeClient, type BridgeClient } from "../bridge-client";
 import {
   buildTaskDraft,
   filterAnnotations,
@@ -13,76 +14,30 @@ import {
 } from "./model";
 import { applyPromptTemplate, promptTemplates, type PromptTemplateId } from "./prompt-templates";
 import { getPanelLanguage, panelText } from "./i18n";
+import {
+  accessKeyStorageKey,
+  legacyProjectPathStorageKey,
+  projectNameStorageKey,
+  storageKeysToRemoveAfterAuthFailure,
+  type ConnectionState
+} from "./connection";
+import { savePendingSequentially } from "./pending-save";
 
 const selectionKey = "ui-annotations.lastSelection";
-const projectPathKey = "ui-annotations.projectPath";
 const pendingAnnotationsKey = "ui-annotations.pendingAnnotations";
 const modeKey = "ui-annotations.mode";
 const screenshotCaptureEnabledKey = "ui-annotations.screenshotCaptureEnabled";
-const bridgeUrl = "http://127.0.0.1:48731";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type AnnotationMode = "idle" | "selecting" | "editing";
 type EditableStatus = Exclude<Annotation["status"], "deleted">;
 
-function newAnnotationId(): string {
-  if (globalThis.crypto?.randomUUID) {
-    return `ann_${globalThis.crypto.randomUUID().slice(0, 8)}`;
-  }
-
-  return `ann_${Date.now()}`;
-}
-
-function projectIdFromPath(projectPath: string): string {
-  const normalized = projectPath.replace(/\/+$/, "");
-  const name = normalized.split("/").filter(Boolean).at(-1) ?? "project";
-  return name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "project";
-}
-
-function createAnnotation(input: {
-  projectPath: string;
-  selection: SelectedElement;
-  note: string;
-  changeType: Annotation["changeType"];
-  priority: Annotation["priority"];
-  targetPlatforms: Annotation["targetPlatforms"];
-}): Annotation {
-  const now = new Date().toISOString();
-  return {
-    id: newAnnotationId(),
-    projectId: projectIdFromPath(input.projectPath),
-    page: {
-      url: input.selection.url,
-      ...(input.selection.route ? { route: input.selection.route } : {}),
-      ...(input.selection.title ? { title: input.selection.title } : {}),
-      viewport: input.selection.viewport
-    },
-    anchor: {
-      dom: {
-        selector: input.selection.selector,
-        xpath: input.selection.xpath,
-        textExcerpt: input.selection.textExcerpt,
-        boundingBox: input.selection.boundingBox
-      },
-      visual: {
-        boundingBox: input.selection.boundingBox
-      }
-    },
-    note: input.note,
-    changeType: input.changeType,
-    priority: input.priority,
-    status: "open",
-    targetPlatforms: input.targetPlatforms,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-
 export function App() {
   const t = panelText[getPanelLanguage()];
-  const [bridgeStatus, setBridgeStatus] = useState("checking");
+  const [connection, setConnection] = useState<ConnectionState>({ status: "offline" });
+  const [accessKeyInput, setAccessKeyInput] = useState("");
+  const [projectName, setProjectName] = useState("");
   const [selection, setSelection] = useState<SelectedElement | null>(null);
-  const [projectPath, setProjectPath] = useState("");
   const [note, setNote] = useState("");
   const [changeType, setChangeType] = useState<Annotation["changeType"]>("layout");
   const [priority, setPriority] = useState<Annotation["priority"]>("medium");
@@ -109,40 +64,17 @@ export function App() {
   const [selectedPromptTemplate, setSelectedPromptTemplate] = useState<PromptTemplateId>("web-frontend-implementer");
   const [screenshotCaptureEnabled, setScreenshotCaptureEnabled] = useState(false);
 
-  const loadSavedAnnotations = async (path: string) => {
-    if (!path.trim()) {
-      setSavedAnnotations([]);
-      setSelectedTaskAnnotationIds([]);
-      return;
-    }
-
-    const response = await fetch(`${bridgeUrl}/annotations?projectPath=${encodeURIComponent(path.trim())}`);
-    const body = (await response.json()) as { annotations?: Annotation[]; message?: string; error?: string };
-    if (!response.ok) {
-      throw new Error(body.message ?? body.error ?? t.messages.couldNotLoadSavedAnnotations);
-    }
-    const annotations = body.annotations ?? [];
+  const loadSavedAnnotations = async (client: BridgeClient) => {
+    const { annotations } = await client.listAnnotations();
     setSavedAnnotations(annotations);
     setSelectedTaskAnnotationIds((current) =>
       current.filter((annotationId) => annotations.some((annotation) => annotation.id === annotationId))
     );
   };
 
-  const loadProjectSettings = async (path: string) => {
-    if (!path.trim()) {
-      setScreenshotCaptureEnabled(false);
-      return;
-    }
-    const response = await fetch(`${bridgeUrl}/project-settings?projectPath=${encodeURIComponent(path.trim())}`);
-    const body = (await response.json()) as {
-      settings?: { screenshotCaptureEnabled?: boolean };
-      message?: string;
-      error?: string;
-    };
-    if (!response.ok || !body.settings) {
-      throw new Error(body.message ?? body.error ?? t.messages.couldNotLoadProjectSettings);
-    }
-    const enabled = body.settings.screenshotCaptureEnabled === true;
+  const loadProjectSettings = async (client: BridgeClient) => {
+    const { settings } = await client.getProjectSettings();
+    const enabled = settings.screenshotCaptureEnabled === true;
     setScreenshotCaptureEnabled(enabled);
     chrome.storage.local.set({ [screenshotCaptureEnabledKey]: enabled });
   };
@@ -152,7 +84,6 @@ export function App() {
       chrome.runtime.sendMessage(
         {
           type: "ui-annotations.captureVisualAssets",
-          projectPath: projectPath.trim(),
           annotationId: annotation.id,
           selection: currentSelection
         },
@@ -168,43 +99,57 @@ export function App() {
     });
 
   useEffect(() => {
-    chrome.runtime.sendMessage({ type: "ui-annotations.health" }, (response) => {
-      setBridgeStatus(response?.ok ? "connected" : "unavailable");
-    });
-
-    chrome.storage.local.get([selectionKey, projectPathKey, pendingAnnotationsKey, modeKey, screenshotCaptureEnabledKey], (result) => {
+    chrome.storage.local.get([
+      selectionKey,
+      accessKeyStorageKey,
+      projectNameStorageKey,
+      pendingAnnotationsKey,
+      modeKey,
+      screenshotCaptureEnabledKey
+    ], (result) => {
       const storedSelection = (result[selectionKey] as SelectedElement | undefined) ?? null;
-      const storedProjectPath = (result[projectPathKey] as string | undefined) ?? "";
-      const inferredProjectPath = storedSelection ? (inferProjectPathFromPageUrl(storedSelection.url) ?? "") : "";
+      const storedAccessKey = String(result[accessKeyStorageKey] ?? "").trim();
       setSelection(storedSelection);
-      setProjectPath(storedProjectPath || inferredProjectPath);
-      if (!storedProjectPath && inferredProjectPath) {
-        chrome.storage.local.set({ [projectPathKey]: inferredProjectPath });
-      }
-      if (storedProjectPath || inferredProjectPath) {
-        loadSavedAnnotations(storedProjectPath || inferredProjectPath).catch((error: unknown) => {
-          setSaveState("error");
-          setMessage(error instanceof Error ? error.message : String(error));
-        });
-        loadProjectSettings(storedProjectPath || inferredProjectPath).catch((error: unknown) => {
-          setSaveState("error");
-          setMessage(error instanceof Error ? error.message : String(error));
-        });
-      }
+      setAccessKeyInput(storedAccessKey);
       setScreenshotCaptureEnabled(result[screenshotCaptureEnabledKey] === true);
       setPendingAnnotations((result[pendingAnnotationsKey] as Annotation[] | undefined) ?? []);
       setAnnotationMode((result[modeKey] as AnnotationMode | undefined) ?? "idle");
+
+      const client = createBridgeClient({ accessKey: storedAccessKey });
+      client.getHealth()
+        .then(async () => {
+          if (!storedAccessKey) {
+            setConnection({ status: "key-required" });
+            return;
+          }
+          try {
+            const session = await client.getSession();
+            setConnection({ status: "ready", projectName: session.projectName });
+            setProjectName(session.projectName);
+            await Promise.all([loadSavedAnnotations(client), loadProjectSettings(client)]);
+          } catch (error) {
+            if (error instanceof BridgeClientError && error.kind === "auth") {
+              await chrome.storage.local.remove(storageKeysToRemoveAfterAuthFailure());
+              setAccessKeyInput("");
+              setProjectName("");
+              setConnection({ status: "key-required" });
+              setMessage(t.messages.accessKeyRejected);
+              return;
+            }
+            setConnection({ status: "offline" });
+            setMessage(t.messages.bridgeOffline);
+          }
+        })
+        .catch(() => {
+          setConnection({ status: "offline" });
+          setMessage(t.messages.bridgeOffline);
+        });
     });
 
     const onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
       if (areaName === "local" && changes[selectionKey]) {
         const nextSelection = (changes[selectionKey].newValue as SelectedElement | undefined) ?? null;
-        const inferredProjectPath = nextSelection ? (inferProjectPathFromPageUrl(nextSelection.url) ?? "") : "";
         setSelection(nextSelection);
-        if (!projectPath && inferredProjectPath) {
-          setProjectPath(inferredProjectPath);
-          chrome.storage.local.set({ [projectPathKey]: inferredProjectPath });
-        }
         setIsSelecting(false);
         setSaveState("idle");
         setMessage("");
@@ -251,10 +196,49 @@ export function App() {
     });
   };
 
-  const updateScreenshotCaptureSetting = async (enabled: boolean) => {
-    if (!projectPath.trim()) {
+  const connectBridge = async () => {
+    const accessKey = accessKeyInput.trim();
+    if (!accessKey) {
+      setConnection({ status: "key-required" });
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeScreenshot);
+      setMessage(t.messages.accessKeyRejected);
+      return;
+    }
+
+    setSaveState("saving");
+    try {
+      const client = createBridgeClient({ accessKey });
+      const session = await client.getSession();
+      await chrome.storage.local.set({
+        [accessKeyStorageKey]: accessKey,
+        [projectNameStorageKey]: session.projectName
+      });
+      await chrome.storage.local.remove(legacyProjectPathStorageKey);
+      setProjectName(session.projectName);
+      setConnection({ status: "ready", projectName: session.projectName });
+      await Promise.all([loadSavedAnnotations(client), loadProjectSettings(client)]);
+      setSaveState("saved");
+      setMessage(t.messages.bridgeReady(session.projectName));
+    } catch (error) {
+      if (error instanceof BridgeClientError && error.kind === "auth") {
+        await chrome.storage.local.remove(storageKeysToRemoveAfterAuthFailure());
+        setAccessKeyInput("");
+        setProjectName("");
+        setConnection({ status: "key-required" });
+        setSaveState("error");
+        setMessage(t.messages.accessKeyRejected);
+        return;
+      }
+      setConnection({ status: "offline" });
+      setSaveState("error");
+      setMessage(error instanceof Error ? error.message : t.messages.bridgeOffline);
+    }
+  };
+
+  const updateScreenshotCaptureSetting = async (enabled: boolean) => {
+    if (connection.status !== "ready") {
+      setSaveState("error");
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
@@ -263,20 +247,9 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.updatingProjectSettings);
     try {
-      const response = await fetch(`${bridgeUrl}/project-settings`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectPath: projectPath.trim(), patch: { screenshotCaptureEnabled: enabled } })
-      });
-      const body = (await response.json()) as {
-        settings?: { screenshotCaptureEnabled?: boolean };
-        message?: string;
-        error?: string;
-      };
-      if (!response.ok || !body.settings) {
-        throw new Error(body.message ?? body.error ?? t.messages.couldNotUpdateProjectSettings);
-      }
-      const nextEnabled = body.settings.screenshotCaptureEnabled === true;
+      const { settings } = await createBridgeClient({ accessKey: accessKeyInput.trim() })
+        .updateProjectSettings(enabled);
+      const nextEnabled = settings.screenshotCaptureEnabled === true;
       setScreenshotCaptureEnabled(nextEnabled);
       chrome.storage.local.set({ [screenshotCaptureEnabledKey]: nextEnabled });
       setSaveState("saved");
@@ -296,9 +269,9 @@ export function App() {
       return;
     }
 
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready" || !projectName) {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathForAnnotations);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
@@ -310,9 +283,8 @@ export function App() {
 
     setSaveState("saving");
     setMessage("");
-    const trimmedProjectPath = projectPath.trim();
-    let annotation = createAnnotation({
-      projectPath: trimmedProjectPath,
+    let annotation = createAnnotationFromSelection({
+      projectName,
       selection,
       note: note.trim(),
       changeType,
@@ -327,7 +299,7 @@ export function App() {
         annotation = mergeVisualAssetPaths(annotation, paths);
       }
       const nextPendingAnnotations = [...pendingAnnotations, annotation];
-      chrome.storage.local.set({ [projectPathKey]: trimmedProjectPath, [pendingAnnotationsKey]: nextPendingAnnotations });
+      chrome.storage.local.set({ [pendingAnnotationsKey]: nextPendingAnnotations });
       setPendingAnnotations(nextPendingAnnotations);
       setSaveState("saved");
       setMessage(t.messages.addedToPending(annotation.id));
@@ -345,16 +317,16 @@ export function App() {
   };
 
   const refreshSavedAnnotations = async () => {
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeRefreshing);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
     setSaveState("saving");
     setMessage(t.messages.loadingSavedAnnotations);
     try {
-      await loadSavedAnnotations(projectPath);
+      await loadSavedAnnotations(createBridgeClient({ accessKey: accessKeyInput.trim() }));
       setSaveState("saved");
       setMessage(t.messages.savedAnnotationsLoaded);
     } catch (error) {
@@ -364,25 +336,18 @@ export function App() {
   };
 
   const updateSavedAnnotationStatus = async (annotationId: string, status: EditableStatus) => {
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeUpdating);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
     setSaveState("saving");
     setMessage(t.messages.updatingAnnotation(annotationId));
     try {
-      const response = await fetch(`${bridgeUrl}/annotations/${encodeURIComponent(annotationId)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectPath: projectPath.trim(), patch: { status } })
-      });
-      const body = (await response.json()) as { annotation?: Annotation; message?: string; error?: string };
-      if (!response.ok || !body.annotation) {
-        throw new Error(body.message ?? body.error ?? t.messages.couldNotUpdateAnnotation(annotationId));
-      }
-      setSavedAnnotations((current) => replaceAnnotation(current, body.annotation as Annotation));
+      const { annotation } = await createBridgeClient({ accessKey: accessKeyInput.trim() })
+        .updateAnnotation(annotationId, { status });
+      setSavedAnnotations((current) => replaceAnnotation(current, annotation));
       setSaveState("saved");
       setMessage(t.messages.updatedAnnotation(annotationId));
     } catch (error) {
@@ -392,24 +357,16 @@ export function App() {
   };
 
   const deleteSavedAnnotation = async (annotationId: string) => {
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeDeleting);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
     setSaveState("saving");
     setMessage(t.messages.deletingAnnotation(annotationId));
     try {
-      const response = await fetch(`${bridgeUrl}/annotations/${encodeURIComponent(annotationId)}`, {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectPath: projectPath.trim() })
-      });
-      const body = (await response.json()) as { message?: string; error?: string };
-      if (!response.ok) {
-        throw new Error(body.message ?? body.error ?? t.messages.couldNotDeleteAnnotation(annotationId));
-      }
+      await createBridgeClient({ accessKey: accessKeyInput.trim() }).deleteAnnotation(annotationId);
       setSavedAnnotations((current) => removeAnnotationById(current, annotationId));
       setSelectedTaskAnnotationIds((current) => current.filter((id) => id !== annotationId));
       setSaveState("saved");
@@ -421,9 +378,9 @@ export function App() {
   };
 
   const saveAllAnnotations = async () => {
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeSavingList);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
 
@@ -435,25 +392,26 @@ export function App() {
 
     setSaveState("saving");
     setMessage(t.messages.savingAnnotations(pendingAnnotations.length));
-    const trimmedProjectPath = projectPath.trim();
+    const savedCount = pendingAnnotations.length;
+    const client = createBridgeClient({ accessKey: accessKeyInput.trim() });
     try {
-      for (const annotation of pendingAnnotations) {
-        const response = await fetch(`${bridgeUrl}/annotations`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectPath: trimmedProjectPath, annotation })
-        });
-        const body = (await response.json()) as { message?: string; error?: string };
-        if (!response.ok) {
-          throw new Error(body.message ?? body.error ?? t.messages.bridgeRejected(annotation.id));
+      await savePendingSequentially(
+        pendingAnnotations,
+        async (annotation) => {
+          await client.createAnnotation(annotation);
+        },
+        async (acknowledged) => {
+          const result = await chrome.storage.local.get(pendingAnnotationsKey);
+          const latest = (result[pendingAnnotationsKey] as Annotation[] | undefined) ?? [];
+          const index = latest.findIndex((annotation) => annotation.id === acknowledged.id);
+          const updated = index < 0 ? latest : [...latest.slice(0, index), ...latest.slice(index + 1)];
+          await chrome.storage.local.set({ [pendingAnnotationsKey]: updated });
+          setPendingAnnotations(updated);
         }
-      }
-
-      chrome.storage.local.set({ [projectPathKey]: trimmedProjectPath, [pendingAnnotationsKey]: [] });
-      setPendingAnnotations([]);
-      await loadSavedAnnotations(trimmedProjectPath);
+      );
+      await loadSavedAnnotations(client);
       setSaveState("saved");
-      setMessage(t.messages.savedAnnotationsToFiles(pendingAnnotations.length));
+      setMessage(t.messages.savedAnnotationsToFiles(savedCount));
     } catch (error) {
       setSaveState("error");
       setMessage(error instanceof Error ? error.message : String(error));
@@ -511,9 +469,9 @@ export function App() {
       .map((file) => file.trim())
       .filter(Boolean);
 
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeTask);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
     if (selectedAnnotations.length === 0) {
@@ -530,22 +488,13 @@ export function App() {
     setSaveState("saving");
     setMessage(t.messages.generatingTask(taskId.trim()));
     try {
-      const response = await fetch(`${bridgeUrl}/tasks`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectPath: projectPath.trim(),
-          taskId: taskId.trim(),
-          annotations: selectedAnnotations,
-          userIntent: userIntent.trim(),
-          acceptanceCriteria: criteria,
-          ...(files.length > 0 ? { suggestedFiles: files } : {})
-        })
+      const body = await createBridgeClient({ accessKey: accessKeyInput.trim() }).createTask({
+        taskId: taskId.trim(),
+        annotations: selectedAnnotations,
+        userIntent: userIntent.trim(),
+        acceptanceCriteria: criteria,
+        ...(files.length > 0 ? { suggestedFiles: files } : {})
       });
-      const body = (await response.json()) as { jsonPath?: string; markdownPath?: string; message?: string; error?: string };
-      if (!response.ok) {
-        throw new Error(body.message ?? body.error ?? t.messages.couldNotGenerateTask(taskId.trim()));
-      }
       setLastGeneratedTaskId(taskId.trim());
       setAgentRunState("idle");
       setSaveState("saved");
@@ -558,9 +507,9 @@ export function App() {
 
   const sendToCodex = async () => {
     const taskIdToRun = lastGeneratedTaskId || taskId.trim();
-    if (!projectPath.trim()) {
+    if (connection.status !== "ready") {
       setSaveState("error");
-      setMessage(t.messages.enterProjectPathBeforeCodex);
+      setMessage(t.messages.accessKeyRejected);
       return;
     }
     if (!taskIdToRun) {
@@ -573,30 +522,14 @@ export function App() {
     setAgentRunState("running");
     setMessage(t.messages.sendingToCodex(taskIdToRun));
     try {
-      const response = await fetch(`${bridgeUrl}/agent-runs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectPath: projectPath.trim(),
-          taskId: taskIdToRun,
-          agent: "codex"
-        })
-      });
-      const body = (await response.json()) as {
-        run?: { runId: string; status: "completed" | "failed"; stdout?: string; stderr?: string };
-        message?: string;
-        error?: string;
-      };
-      if (!response.ok || !body.run) {
-        throw new Error(body.message ?? body.error ?? t.messages.couldNotSendToCodex(taskIdToRun));
-      }
+      const body = await createBridgeClient({ accessKey: accessKeyInput.trim() }).runAgent(taskIdToRun);
 
       setAgentRunState(body.run.status);
       setSaveState(body.run.status === "completed" ? "saved" : "error");
       setMessage(
         body.run.status === "completed"
           ? t.messages.codexCompleted(body.run.runId)
-          : t.messages.codexFailed(body.run.runId, body.run.stderr ?? t.messages.seeRunRecord)
+          : t.messages.codexFailed(body.run.runId, t.messages.seeRunRecord)
       );
     } catch (error) {
       setAgentRunState("failed");
@@ -622,16 +555,16 @@ export function App() {
         <div style={{ alignItems: "center", display: "flex", gap: 8, flexWrap: "wrap" }}>
           <span
             style={{
-              background: bridgeStatus === "connected" ? "rgba(52, 211, 153, 0.12)" : "rgba(249, 115, 22, 0.12)",
-              border: `1px solid ${bridgeStatus === "connected" ? "#047857" : "#c2410c"}`,
+              background: connection.status === "ready" ? "rgba(52, 211, 153, 0.12)" : "rgba(249, 115, 22, 0.12)",
+              border: `1px solid ${connection.status === "ready" ? "#047857" : "#c2410c"}`,
               borderRadius: 999,
-              color: bridgeStatus === "connected" ? "#34d399" : "#f97316",
+              color: connection.status === "ready" ? "#34d399" : "#f97316",
               fontSize: 12,
               fontWeight: 800,
               padding: "4px 8px"
             }}
           >
-            {t.bridgeStatus(bridgeStatus)}
+            {t.bridgeStatus(t.connectionStatuses[connection.status])}
           </span>
           <span
             style={{
@@ -665,17 +598,17 @@ export function App() {
 
       <section style={{ display: "grid", gap: 12 }}>
         <label style={{ display: "grid", gap: 6, fontSize: 13, fontWeight: 700 }}>
-          {t.projectPath}
+          {t.accessKey}
           <input
-            value={projectPath}
+            type="password"
+            value={accessKeyInput}
             onChange={(event) => {
-              setProjectPath(event.target.value);
-              chrome.storage.local.set({ [projectPathKey]: event.target.value });
-              loadProjectSettings(event.target.value).catch(() => {
-                // Settings errors are surfaced by explicit refresh or toggle actions.
-              });
+              setAccessKeyInput(event.target.value);
+              setProjectName("");
+              setConnection({ status: "key-required" });
             }}
-            placeholder="/Users/joker/Desktop/familyLocator/prototype"
+            placeholder={t.accessKeyPlaceholder}
+            autoComplete="off"
             style={{
               background: "#111a23",
               border: "1px solid #2c3a46",
@@ -686,6 +619,9 @@ export function App() {
             }}
           />
         </label>
+        <button type="button" onClick={connectBridge} disabled={saveState === "saving"}>
+          {t.connectBridge}
+        </button>
 
         <label
           style={{
@@ -701,6 +637,7 @@ export function App() {
         >
           <input
             checked={screenshotCaptureEnabled}
+            disabled={connection.status !== "ready"}
             onChange={(event) => updateScreenshotCaptureSetting(event.target.checked)}
             type="checkbox"
           />
@@ -817,7 +754,7 @@ export function App() {
             </p>
           )}
           <button
-            disabled={saveState === "saving" || pendingAnnotations.length === 0}
+            disabled={connection.status !== "ready" || saveState === "saving" || pendingAnnotations.length === 0}
             onClick={saveAllAnnotations}
             type="button"
             style={{
@@ -848,6 +785,7 @@ export function App() {
           <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", gap: 10 }}>
             <h2 style={{ fontSize: 14, margin: 0 }}>{t.savedAnnotations}</h2>
             <button
+              disabled={connection.status !== "ready"}
               onClick={refreshSavedAnnotations}
               type="button"
               style={{
@@ -961,6 +899,7 @@ export function App() {
                   <label style={{ alignItems: "start", display: "grid", gap: 8, gridTemplateColumns: "18px 1fr" }}>
                     <input
                       checked={selectedTaskAnnotationIds.includes(annotation.id)}
+                      disabled={connection.status !== "ready"}
                       onChange={() => toggleTaskAnnotation(annotation.id)}
                       style={{ marginTop: 2 }}
                       type="checkbox"
@@ -976,6 +915,7 @@ export function App() {
                   <div style={{ alignItems: "center", display: "grid", gap: 8, gridTemplateColumns: "1fr auto" }}>
                     <select
                       aria-label={`${t.filterByStatus} ${annotation.id}`}
+                      disabled={connection.status !== "ready"}
                       value={annotation.status === "deleted" ? "open" : annotation.status}
                       onChange={(event) =>
                         updateSavedAnnotationStatus(annotation.id, event.target.value as EditableStatus)
@@ -995,6 +935,7 @@ export function App() {
                       <option value="resolved">{t.statuses.resolved}</option>
                     </select>
                     <button
+                      disabled={connection.status !== "ready"}
                       onClick={() => deleteSavedAnnotation(annotation.id)}
                       type="button"
                       style={{
@@ -1036,7 +977,7 @@ export function App() {
             <span style={{ color: "#93a4b3", fontSize: 12 }}>{t.selectedCount(selectedTaskAnnotationIds.length)}</span>
           </div>
           <button
-            disabled={selectedTaskAnnotationIds.length === 0}
+            disabled={connection.status !== "ready" || selectedTaskAnnotationIds.length === 0}
             onClick={useTaskDefaults}
             type="button"
             style={{
@@ -1073,7 +1014,7 @@ export function App() {
               ))}
             </select>
             <button
-              disabled={selectedTaskAnnotationIds.length === 0}
+              disabled={connection.status !== "ready" || selectedTaskAnnotationIds.length === 0}
               onClick={usePromptTemplate}
               type="button"
               style={{
@@ -1164,7 +1105,7 @@ export function App() {
             />
           </label>
           <button
-            disabled={saveState === "saving"}
+            disabled={connection.status !== "ready" || saveState === "saving"}
             onClick={createTaskPackage}
             type="button"
             style={{
@@ -1181,7 +1122,7 @@ export function App() {
             {t.generateTaskFiles}
           </button>
           <button
-            disabled={saveState === "saving" || !(lastGeneratedTaskId || taskId.trim())}
+            disabled={connection.status !== "ready" || saveState === "saving" || !(lastGeneratedTaskId || taskId.trim())}
             onClick={sendToCodex}
             type="button"
             style={{
@@ -1284,7 +1225,7 @@ export function App() {
         </fieldset>
 
         <button
-          disabled={saveState === "saving"}
+          disabled={connection.status !== "ready" || saveState === "saving"}
           onClick={saveAnnotation}
           type="button"
           style={{

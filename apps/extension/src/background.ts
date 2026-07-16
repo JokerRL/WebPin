@@ -1,13 +1,13 @@
 import type { Annotation } from "@ui-annotations/shared";
 import type { SelectedElement } from "./content";
+import { createAnnotationFromSelection } from "./annotation-factory";
+import { createBridgeClient } from "./bridge-client";
 import { mergeVisualAssetPaths, type VisualAssetPaths } from "./panel/model";
-import { inferProjectPathFromPageUrl } from "./project-path";
+import { accessKeyStorageKey, projectNameStorageKey } from "./panel/connection";
 
-const projectPathKey = "ui-annotations.projectPath";
 const pendingAnnotationsKey = "ui-annotations.pendingAnnotations";
 const modeKey = "ui-annotations.mode";
 const screenshotCaptureEnabledKey = "ui-annotations.screenshotCaptureEnabled";
-const bridgeUrl = "http://127.0.0.1:48731";
 
 function newCommandId(): string {
   if (globalThis.crypto?.randomUUID) {
@@ -15,59 +15,6 @@ function newCommandId(): string {
   }
 
   return `cmd_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-
-function newAnnotationId(): string {
-  if (globalThis.crypto?.randomUUID) {
-    return `ann_${globalThis.crypto.randomUUID().slice(0, 8)}`;
-  }
-
-  return `ann_${Date.now()}`;
-}
-
-function projectIdFromPath(projectPath: string): string {
-  const normalized = projectPath.replace(/\/+$/, "");
-  const name = normalized.split("/").filter(Boolean).at(-1) ?? "project";
-  return name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "project";
-}
-
-function createAnnotation(input: {
-  projectPath: string;
-  selection: SelectedElement;
-  note: string;
-  changeType: Annotation["changeType"];
-  priority: Annotation["priority"];
-  targetPlatforms: Annotation["targetPlatforms"];
-}): Annotation {
-  const now = new Date().toISOString();
-  return {
-    id: newAnnotationId(),
-    projectId: projectIdFromPath(input.projectPath),
-    page: {
-      url: input.selection.url,
-      ...(input.selection.route ? { route: input.selection.route } : {}),
-      ...(input.selection.title ? { title: input.selection.title } : {}),
-      viewport: input.selection.viewport
-    },
-    anchor: {
-      dom: {
-        selector: input.selection.selector,
-        xpath: input.selection.xpath,
-        textExcerpt: input.selection.textExcerpt,
-        boundingBox: input.selection.boundingBox
-      },
-      visual: {
-        boundingBox: input.selection.boundingBox
-      }
-    },
-    note: input.note,
-    changeType: input.changeType,
-    priority: input.priority,
-    status: "open",
-    targetPlatforms: input.targetPlatforms,
-    createdAt: now,
-    updatedAt: now
-  };
 }
 
 async function cropDataUrl(
@@ -97,25 +44,21 @@ async function cropDataUrl(
 }
 
 async function uploadAsset(input: {
-  projectPath: string;
+  accessKey: string;
   annotationId: string;
   kind: "screenshot" | "crop";
   dataUrl: string;
 }): Promise<string> {
-  const response = await fetch(`${bridgeUrl}/assets`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input)
+  const { path } = await createBridgeClient({ accessKey: input.accessKey }).writeAsset({
+    annotationId: input.annotationId,
+    kind: input.kind,
+    dataUrl: input.dataUrl
   });
-  const body = (await response.json()) as { path?: string; message?: string; error?: string };
-  if (!response.ok || !body.path) {
-    throw new Error(body.message ?? body.error ?? `Could not write ${input.kind} asset.`);
-  }
-  return body.path;
+  return path;
 }
 
 async function captureVisualAssets(input: {
-  projectPath: string;
+  accessKey: string;
   annotationId: string;
   selection: SelectedElement;
 }): Promise<VisualAssetPaths> {
@@ -128,13 +71,13 @@ async function captureVisualAssets(input: {
   const screenshotDataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
   const crop = await cropDataUrl(screenshotDataUrl, input.selection.boundingBox, input.selection.viewport.deviceScaleFactor);
   const screenshot = await uploadAsset({
-    projectPath: input.projectPath,
+    accessKey: input.accessKey,
     annotationId: input.annotationId,
     kind: "screenshot",
     dataUrl: screenshotDataUrl
   });
   const cropPath = await uploadAsset({
-    projectPath: input.projectPath,
+    accessKey: input.accessKey,
     annotationId: input.annotationId,
     kind: "crop",
     dataUrl: crop
@@ -208,18 +151,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "ui-annotations.health") {
-    fetch(`${bridgeUrl}/health`)
-      .then((response) => response.json())
+    createBridgeClient({ accessKey: "" })
+      .getHealth()
       .then((body) => sendResponse({ ok: true, bridge: body }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
 
   if (message?.type === "ui-annotations.captureVisualAssets") {
-    captureVisualAssets({
-      projectPath: String(message.projectPath ?? ""),
-      annotationId: String(message.annotationId ?? ""),
-      selection: message.selection as SelectedElement
+    chrome.storage.local.get(accessKeyStorageKey).then((result) => {
+      const accessKey = String(result[accessKeyStorageKey] ?? "").trim();
+      if (!accessKey) {
+        throw new Error("Connect the bridge in the side panel before capturing screenshots.");
+      }
+      return captureVisualAssets({
+        accessKey,
+        annotationId: String(message.annotationId ?? ""),
+        selection: message.selection as SelectedElement
+      });
     })
       .then((paths) => sendResponse({ ok: true, paths }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
@@ -228,13 +177,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "ui-annotations.saveInlineAnnotation") {
     chrome.storage.local
-      .get(projectPathKey)
+      .get([accessKeyStorageKey, projectNameStorageKey])
       .then(async (result) => {
         const selection = message.selection as SelectedElement;
-        const projectPath =
-          String(result[projectPathKey] ?? "").trim() || inferProjectPathFromPageUrl(selection.url) || "";
-        if (!projectPath) {
-          sendResponse({ ok: false, error: "Set Project path in the side panel before saving hosted pages." });
+        const accessKey = String(result[accessKeyStorageKey] ?? "").trim();
+        const projectName = String(result[projectNameStorageKey] ?? "").trim();
+        if (!accessKey || !projectName) {
+          sendResponse({ ok: false, error: "Connect the bridge in the side panel before saving." });
           return;
         }
 
@@ -244,8 +193,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
 
-        let annotation = createAnnotation({
-          projectPath,
+        let annotation = createAnnotationFromSelection({
+          projectName,
           selection,
           note,
           changeType: message.changeType as Annotation["changeType"],
@@ -255,13 +204,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         const settingsResult = await chrome.storage.local.get(screenshotCaptureEnabledKey);
         if (settingsResult[screenshotCaptureEnabledKey] === true) {
-          const paths = await captureVisualAssets({ projectPath, annotationId: annotation.id, selection });
+          const paths = await captureVisualAssets({ accessKey, annotationId: annotation.id, selection });
           annotation = mergeVisualAssetPaths(annotation, paths);
         }
 
         const pendingResult = await chrome.storage.local.get(pendingAnnotationsKey);
         const pendingAnnotations = (pendingResult[pendingAnnotationsKey] as Annotation[] | undefined) ?? [];
-        await chrome.storage.local.set({ [projectPathKey]: projectPath, [pendingAnnotationsKey]: [...pendingAnnotations, annotation] });
+        await chrome.storage.local.set({ [pendingAnnotationsKey]: [...pendingAnnotations, annotation] });
         sendResponse({ ok: true, annotationId: annotation.id });
       })
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
