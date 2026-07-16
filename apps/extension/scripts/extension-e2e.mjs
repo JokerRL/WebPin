@@ -9,21 +9,36 @@ import { createBridgeServer } from "../../bridge/dist/server.js";
 const bridgeHost = "127.0.0.1";
 const bridgePort = 48731;
 const sampleHost = "127.0.0.1";
-const samplePort = 49123;
 const accessKey = "extension-e2e-key";
 const note = "Make the save button taller.";
 const taskId = "task-extension-e2e";
+const userIntent = note;
+const acceptanceCriterion = "The Save button is taller without changing its label.";
 const extensionPath = resolve("apps/extension/dist");
 
-function listen(server, port, host) {
+function listenError(error, label, host, port) {
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  const reason = error instanceof Error ? error.message : String(error);
+  const guidance =
+    code === "EADDRINUSE"
+      ? ` Another process is already using ${host}:${port}; stop it before running the extension E2E test.`
+      : code === "EPERM"
+        ? ` Binding ${host}:${port} was denied; check local networking permissions and sandbox policy.`
+        : "";
+  return new Error(`${label} failed to listen on ${host}:${port}${code ? ` (${code})` : ""}: ${reason}.${guidance}`, {
+    cause: error instanceof Error ? error : undefined
+  });
+}
+
+function listen(server, port, host, label) {
   return new Promise((resolveListen, reject) => {
     const onError = (error) => {
       server.off("listening", onListening);
-      reject(error);
+      reject(listenError(error, label, host, port));
     };
     const onListening = () => {
       server.off("error", onError);
-      resolveListen();
+      resolveListen(server.address());
     };
     server.once("error", onError);
     server.once("listening", onListening);
@@ -58,40 +73,43 @@ async function readAnnotationHistory(projectPath) {
 }
 
 async function run() {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "webpin-extension-e2e-"));
-  const projectDirectory = join(temporaryRoot, "project");
-  const profileDirectory = join(temporaryRoot, "chromium-profile");
-  await Promise.all([mkdir(projectDirectory), mkdir(profileDirectory)]);
-  const projectPath = await realpath(projectDirectory);
-  const profilePath = await realpath(profileDirectory);
-
-  const bridgeServer = createBridgeServer({
-    accessKey,
-    projectName: "extension-e2e-project",
-    projectPath,
-    allowedOrigins: ["chrome-extension://*"]
-  });
-  const bridgeRequests = [];
-  bridgeServer.on("request", (request, response) => {
-    response.on("finish", () => {
-      bridgeRequests.push({ method: request.method, url: request.url, status: response.statusCode });
-    });
-  });
-
-  const sampleServer = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(`<!doctype html><html><head><title>Extension E2E sample</title></head><body>
-      <button data-testid="save-button" style="margin:80px;width:180px;height:44px">Save changes</button>
-    </body></html>`);
-  });
-
+  let temporaryRoot;
+  let bridgeServer;
+  let sampleServer;
   let context;
+  const bridgeRequests = [];
   const browserDiagnostics = [];
   try {
-    await Promise.all([
-      listen(bridgeServer, bridgePort, bridgeHost),
-      listen(sampleServer, samplePort, sampleHost)
-    ]);
+    temporaryRoot = await mkdtemp(join(tmpdir(), "webpin-extension-e2e-"));
+    const projectDirectory = join(temporaryRoot, "project");
+    const profileDirectory = join(temporaryRoot, "chromium-profile");
+    await Promise.all([mkdir(projectDirectory), mkdir(profileDirectory)]);
+    const projectPath = await realpath(projectDirectory);
+    const profilePath = await realpath(profileDirectory);
+
+    bridgeServer = createBridgeServer({
+      accessKey,
+      projectName: "extension-e2e-project",
+      projectPath,
+      allowedOrigins: ["chrome-extension://*"]
+    });
+    bridgeServer.on("request", (request, response) => {
+      response.on("finish", () => {
+        bridgeRequests.push({ method: request.method, url: request.url, status: response.statusCode });
+      });
+    });
+
+    sampleServer = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html><html><head><title>Extension E2E sample</title></head><body>
+        <button data-testid="save-button" style="margin:80px;width:180px;height:44px">Save changes</button>
+      </body></html>`);
+    });
+
+    await listen(bridgeServer, bridgePort, bridgeHost, "Local File Bridge");
+    const sampleAddress = await listen(sampleServer, 0, sampleHost, "Sample server");
+    assert.ok(sampleAddress && typeof sampleAddress === "object", "Sample server should expose its assigned TCP port.");
+    const sampleUrl = `http://${sampleHost}:${sampleAddress.port}/`;
 
     context = await chromium.launchPersistentContext(profilePath, {
       channel: "chromium",
@@ -137,7 +155,7 @@ async function run() {
     await panelPage.getByRole("status").filter({ hasText: /Bridge: Ready|桥接服务：已就绪/ }).waitFor();
 
     const samplePage = await context.newPage();
-    await samplePage.goto(`http://${sampleHost}:${samplePort}/`, { waitUntil: "networkidle" });
+    await samplePage.goto(sampleUrl, { waitUntil: "networkidle" });
     await samplePage.evaluate(() => {
       window.postMessage({ type: "ui-annotations.startSelecting", commandId: "extension-e2e-select" }, "*");
     });
@@ -207,13 +225,11 @@ async function run() {
       "The append-only annotation history should persist drafted status."
     );
 
-    const annotationIdText = panelPage.getByText(annotationId, { exact: true });
-    const annotationCard = annotationIdText.locator("xpath=../../..");
-    await annotationCard.getByRole("checkbox").check();
+    await panelPage.getByRole("checkbox", { name: new RegExp(annotationId) }).check();
     await panelPage.getByRole("button", { name: /Draft from selection|根据所选生成草稿/ }).click();
     await panelPage.getByLabel(/Task ID|任务 ID/).fill(taskId);
-    await panelPage.getByLabel(/User intent|用户意图/).fill("Make the sample Save button taller.");
-    await panelPage.getByLabel(/Acceptance criteria|验收标准/).fill("The Save button is taller without changing its label.");
+    await panelPage.getByLabel(/User intent|用户意图/).fill(userIntent);
+    await panelPage.getByLabel(/Acceptance criteria|验收标准/).fill(acceptanceCriterion);
     const taskPost = panelPage.waitForResponse((response) => isBridgeResponse(response, "POST", "/tasks", 201));
     await panelPage.getByRole("button", { name: /Generate task files|生成任务文件/ }).click();
     await taskPost;
@@ -225,10 +241,36 @@ async function run() {
       "Task generation should emit JSON, Markdown, and Codex prompt files."
     );
 
+    const taskRoot = join(projectPath, ".ui-annotations", "tasks");
+    const [taskJsonContents, taskMarkdown, taskPrompt] = await Promise.all([
+      readFile(join(taskRoot, `${taskId}.json`), "utf8"),
+      readFile(join(taskRoot, `${taskId}.md`), "utf8"),
+      readFile(join(taskRoot, `${taskId}.prompt.md`), "utf8")
+    ]);
+    const taskJson = JSON.parse(taskJsonContents);
+    assert.equal(taskJson.taskId, taskId, "Task JSON should preserve the submitted task ID.");
+    assert.deepEqual(taskJson.sourceAnnotations, [annotationId], "Task JSON should reference the selected annotation.");
+    assert.equal(taskJson.userIntent, userIntent, "Task JSON should preserve the annotation note as user intent.");
+    assert.deepEqual(
+      taskJson.acceptanceCriteria,
+      [acceptanceCriterion],
+      "Task JSON should preserve the submitted acceptance criterion."
+    );
+    for (const expected of [taskId, annotationId, note, acceptanceCriterion]) {
+      assert.ok(taskMarkdown.includes(expected), `Task Markdown should include ${JSON.stringify(expected)}.`);
+    }
+    for (const expectedPath of [
+      `.ui-annotations/tasks/${taskId}.md`,
+      `.ui-annotations/tasks/${taskId}.json`
+    ]) {
+      assert.ok(taskPrompt.includes(expectedPath), `Task prompt should reference ${expectedPath}.`);
+    }
+    assert.match(taskPrompt, /source of truth/, "Task prompt should direct the agent to use generated task content.");
+
     const annotationDelete = panelPage.waitForResponse((response) =>
       isBridgeResponse(response, "DELETE", `/annotations/${annotationId}`, 200)
     );
-    await annotationCard.getByRole("button", { name: /^(Delete|删除)$/ }).click();
+    await statusSelect.locator("..").getByRole("button", { name: /^(Delete|删除)$/ }).click();
     await annotationDelete;
     const deletedRefresh = panelPage.waitForResponse((response) =>
       isBridgeResponse(response, "GET", "/annotations", 200)
@@ -240,7 +282,11 @@ async function run() {
       activeAfterDelete.every((annotation) => annotation.id !== annotationId),
       "The refreshed GET response should omit the deleted annotation."
     );
-    assert.equal(await panelPage.getByText(note, { exact: true }).count(), 0, "Deleted annotation should remain absent after refresh.");
+    assert.equal(
+      await panelPage.getByRole("checkbox", { name: new RegExp(annotationId) }).count(),
+      0,
+      "Deleted annotation card should remain absent after refresh."
+    );
 
     for (const expected of [
       ["POST", "/annotations", 201],
@@ -255,8 +301,8 @@ async function run() {
       );
     }
 
+    assert.deepEqual(browserDiagnostics, [], "Browser console and page errors must remain empty.");
     console.log(`PASS packaged MV3 workflow: annotation ${annotationId}, task ${taskId}, GET/auth regression covered.`);
-    if (browserDiagnostics.length > 0) console.warn(browserDiagnostics.join("\n"));
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error));
     if (browserDiagnostics.length > 0) {
@@ -266,7 +312,7 @@ async function run() {
   } finally {
     await context?.close().catch(() => {});
     await Promise.allSettled([close(bridgeServer), close(sampleServer)]);
-    await rm(temporaryRoot, { recursive: true, force: true });
+    if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
   }
 }
 

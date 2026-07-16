@@ -6,6 +6,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:e2e:install": "playwright install chromium",
     "test:e2e:extension": "pnpm --filter @ui-annotations/shared build && pnpm --filter @ui-annotations/extension build && pnpm --filter @ui-annotations/bridge build && node apps/extension/scripts/extension-e2e.mjs",
     "typecheck": "pnpm --filter @ui-annotations/shared build && pnpm -r typecheck",
     "dev:bridge": "pnpm --filter @ui-annotations/bridge dev",
