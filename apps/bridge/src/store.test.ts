@@ -1,6 +1,9 @@
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   appendAnnotation,
@@ -16,6 +19,9 @@ import {
   writeAnnotationAsset,
   writeAgentRun
 } from "./store.js";
+
+const execFileAsync = promisify(execFile);
+const posixIt = process.platform === "win32" ? it.skip : it;
 
 const annotation = {
   id: "ann_001",
@@ -71,6 +77,33 @@ async function createOutsideFile(contents = "outside-content"): Promise<{ path: 
   const path = join(outsideDirectory, "outside.txt");
   await writeFile(path, contents, "utf8");
   return { path, contents };
+}
+
+async function expectPromptManagedFileRejection(
+  operation: () => Promise<unknown>,
+  unblock: () => Promise<void>
+): Promise<void> {
+  const operationPromise = operation();
+  let timeout: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    operationPromise.then(
+      () => "resolved" as const,
+      () => "rejected" as const
+    ),
+    new Promise<"timeout">((resolve) => {
+      timeout = setTimeout(() => resolve("timeout"), 250);
+    })
+  ]);
+  if (timeout) {
+    clearTimeout(timeout);
+  }
+
+  if (outcome === "timeout") {
+    await unblock();
+    await operationPromise.catch(() => undefined);
+  }
+
+  expect(outcome).toBe("rejected");
 }
 
 describe("store", () => {
@@ -189,6 +222,49 @@ describe("store", () => {
     await mkdir(join(projectPath, ".ui-annotations", "project.json"));
 
     await expect(readProjectSettings(projectPath)).rejects.toThrow();
+  });
+
+  posixIt("rejects a FIFO managed-file read without blocking", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    await ensureAnnotationDirs(projectPath);
+    const fifoPath = join(projectPath, ".ui-annotations", "project.json");
+    await execFileAsync("mkfifo", [fifoPath]);
+
+    try {
+      await expectPromptManagedFileRejection(
+        () => readProjectSettings(projectPath),
+        async () => {
+          const writer = await open(fifoPath, constants.O_WRONLY | constants.O_NONBLOCK);
+          await writer.close();
+        }
+      );
+    } finally {
+      await unlink(fifoPath);
+    }
+  });
+
+  posixIt("rejects a FIFO managed-file write without blocking", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    await ensureAnnotationDirs(projectPath);
+    const fifoPath = join(projectPath, ".ui-annotations", "assets", "screenshots", "ann_001.png");
+    await execFileAsync("mkfifo", [fifoPath]);
+
+    try {
+      await expectPromptManagedFileRejection(
+        () =>
+          writeAnnotationAsset(projectPath, {
+            annotationId: "ann_001",
+            kind: "screenshot",
+            dataUrl: "data:image/png;base64,aGVsbG8="
+          }),
+        async () => {
+          const reader = await open(fifoPath, constants.O_RDONLY | constants.O_NONBLOCK);
+          await reader.close();
+        }
+      );
+    } finally {
+      await unlink(fifoPath);
+    }
   });
 
   it("appends validated annotations as jsonl", async () => {

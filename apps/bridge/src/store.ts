@@ -46,6 +46,7 @@ export type AgentRun = {
 };
 
 const noFollowFlag = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+const nonBlockFlag = typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
 const managedFileMode = 0o600;
 
 function isFileSystemError(error: unknown, code: string): boolean {
@@ -85,7 +86,7 @@ async function withManagedRegularFile<T>(
 
   let handle: FileHandle;
   try {
-    handle = await open(filePath, flags | noFollowFlag, managedFileMode);
+    handle = await open(filePath, flags | noFollowFlag | nonBlockFlag, managedFileMode);
   } catch (error) {
     if (isFileSystemError(error, "ELOOP")) {
       throw managedFileTargetError();
@@ -110,8 +111,9 @@ async function readManagedFile(filePath: string): Promise<string> {
 async function writeManagedFile(filePath: string, contents: string | Uint8Array): Promise<void> {
   await withManagedRegularFile(
     filePath,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC,
+    constants.O_WRONLY | constants.O_CREAT,
     async (handle) => {
+      await handle.truncate(0);
       await handle.writeFile(contents);
     }
   );
