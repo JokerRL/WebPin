@@ -40,47 +40,54 @@ function createDeferred(): {
 
 const annotations = [createAnnotation("ann_1"), createAnnotation("ann_2"), createAnnotation("ann_3")];
 
+function removeFirstOccurrenceById(latest: readonly Annotation[], annotationId: string): Annotation[] {
+  const index = latest.findIndex((annotation) => annotation.id === annotationId);
+  if (index === -1) return [...latest];
+  return [...latest.slice(0, index), ...latest.slice(index + 1)];
+}
+
 describe("savePendingSequentially", () => {
-  it("saves in order and reports the remaining annotations after each acknowledgement", async () => {
-    const saveOrder: string[] = [];
-    const snapshots: string[][] = [];
+  it("saves and acknowledges each annotation in order", async () => {
+    const events: string[] = [];
 
     await savePendingSequentially(
       annotations,
       async (annotation) => {
-        saveOrder.push(annotation.id);
+        events.push(`save:${annotation.id}`);
       },
-      (remaining) => {
-        snapshots.push(remaining.map((annotation) => annotation.id));
+      (acknowledged) => {
+        events.push(`acknowledge:${acknowledged.id}`);
       }
     );
 
-    expect(saveOrder).toEqual(["ann_1", "ann_2", "ann_3"]);
-    expect(snapshots).toEqual([
-      ["ann_2", "ann_3"],
-      ["ann_3"],
-      []
+    expect(events).toEqual([
+      "save:ann_1",
+      "acknowledge:ann_1",
+      "save:ann_2",
+      "acknowledge:ann_2",
+      "save:ann_3",
+      "acknowledge:ann_3"
     ]);
   });
 
-  it("rejects the original error and preserves the failed and unattempted remainder", async () => {
+  it("acknowledges only successful saves before a partial failure", async () => {
     const error = new Error("bridge failed");
-    const snapshots: string[][] = [];
+    const acknowledgements: string[] = [];
     const save = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(error);
 
     await expect(
-      savePendingSequentially(annotations, save, (remaining) => {
-        snapshots.push(remaining.map((annotation) => annotation.id));
+      savePendingSequentially(annotations, save, (acknowledged) => {
+        acknowledgements.push(acknowledged.id);
       })
     ).rejects.toBe(error);
 
     expect(save.mock.calls.map(([annotation]) => annotation.id)).toEqual(["ann_1", "ann_2"]);
-    expect(snapshots).toEqual([["ann_2", "ann_3"]]);
+    expect(acknowledgements).toEqual(["ann_1"]);
   });
 
-  it("waits for asynchronous remainder persistence before starting the next save", async () => {
-    const persistenceStarted = createDeferred();
-    const persistenceGate = createDeferred();
+  it("waits for asynchronous acknowledgement before starting the next save", async () => {
+    const acknowledgementStarted = createDeferred();
+    const acknowledgementGate = createDeferred();
     const saveOrder: string[] = [];
     let callbackCount = 0;
 
@@ -92,22 +99,22 @@ describe("savePendingSequentially", () => {
       async () => {
         callbackCount += 1;
         if (callbackCount === 1) {
-          persistenceStarted.resolve();
-          await persistenceGate.promise;
+          acknowledgementStarted.resolve();
+          await acknowledgementGate.promise;
         }
       }
     );
 
-    await persistenceStarted.promise;
+    await acknowledgementStarted.promise;
     expect(saveOrder).toEqual(["ann_1"]);
 
-    persistenceGate.resolve();
+    acknowledgementGate.resolve();
     await operation;
     expect(saveOrder).toEqual(["ann_1", "ann_2", "ann_3"]);
   });
 
-  it("propagates remainder persistence rejection and prevents the next save", async () => {
-    const error = new Error("storage failed");
+  it("propagates acknowledgement rejection and prevents the next save", async () => {
+    const error = new Error("acknowledgement failed");
     const save = vi.fn<(annotation: Annotation) => Promise<void>>(async () => undefined);
 
     await expect(
@@ -119,29 +126,29 @@ describe("savePendingSequentially", () => {
     expect(save.mock.calls.map(([annotation]) => annotation.id)).toEqual(["ann_1"]);
   });
 
-  it("keeps a duplicate id pending until that exact occurrence is acknowledged", async () => {
+  it("emits one acknowledgement for each saved duplicate-id occurrence", async () => {
     const first = createAnnotation("ann_duplicate", "first occurrence");
     const second = createAnnotation("ann_duplicate", "second occurrence");
     const third = createAnnotation("ann_3");
-    const error = new Error("second save failed");
-    const snapshots: string[][] = [];
-    const save = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(error);
+    const acknowledgements: string[] = [];
 
-    await expect(
-      savePendingSequentially([first, second, third], save, (remaining) => {
-        snapshots.push(remaining.map((annotation) => annotation.note));
-      })
-    ).rejects.toBe(error);
+    await savePendingSequentially(
+      [first, second, third],
+      async () => undefined,
+      (acknowledged) => {
+        acknowledgements.push(acknowledged.note);
+      }
+    );
 
-    expect(save.mock.calls.map(([annotation]) => annotation.note)).toEqual(["first occurrence", "second occurrence"]);
-    expect(snapshots).toEqual([["second occurrence", "Note for ann_3"]]);
+    expect(acknowledgements).toEqual(["first occurrence", "second occurrence", "Note for ann_3"]);
   });
 
-  it("attempts the initial snapshot even when the caller mutates its input during a save", async () => {
+  it("uses the initial batch snapshot when the caller adds an annotation during a save", async () => {
     const saveStarted = createDeferred();
     const saveGate = createDeferred();
     const mutableInput = [...annotations];
     const saveOrder: string[] = [];
+    const acknowledgements: string[] = [];
 
     const operation = savePendingSequentially(
       mutableInput,
@@ -152,14 +159,45 @@ describe("savePendingSequentially", () => {
           await saveGate.promise;
         }
       },
-      () => undefined
+      (acknowledged) => {
+        acknowledgements.push(acknowledged.id);
+      }
     );
 
     await saveStarted.promise;
-    mutableInput.splice(1, 2, createAnnotation("ann_external"));
+    mutableInput.push(createAnnotation("ann_external"));
     saveGate.resolve();
     await operation;
 
     expect(saveOrder).toEqual(["ann_1", "ann_2", "ann_3"]);
+    expect(acknowledgements).toEqual(["ann_1", "ann_2", "ann_3"]);
+  });
+
+  it("lets the consumer remove acknowledgements from current state without losing concurrent additions", async () => {
+    const firstSaveStarted = createDeferred();
+    const firstSaveGate = createDeferred();
+    const batch = [createAnnotation("ann_1"), createAnnotation("ann_2")];
+    const concurrent = createAnnotation("ann_3");
+    let latest = [...batch];
+
+    const operation = savePendingSequentially(
+      batch,
+      async (annotation) => {
+        if (annotation.id === "ann_1") {
+          firstSaveStarted.resolve();
+          await firstSaveGate.promise;
+        }
+      },
+      (acknowledged) => {
+        latest = removeFirstOccurrenceById(latest, acknowledged.id);
+      }
+    );
+
+    await firstSaveStarted.promise;
+    latest = [...latest, concurrent];
+    firstSaveGate.resolve();
+    await operation;
+
+    expect(latest.map((annotation) => annotation.id)).toEqual(["ann_3"]);
   });
 });
