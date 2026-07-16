@@ -11,7 +11,7 @@ export interface BridgeConfig {
 
 export interface ConfigDependencies {
   realpath(path: string): Promise<string>;
-  access(path: string, mode?: number): Promise<void>;
+  access(path: string, mode: number): Promise<void>;
   stat(path: string): Promise<{ isDirectory(): boolean }>;
   randomKey(): string;
 }

@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { loadBridgeConfig, type ConfigDependencies } from "./config.js";
 
@@ -33,7 +34,10 @@ describe("loadBridgeConfig", () => {
       projectName: "WebPin",
       accessKey: "test-startup-key"
     });
-    expect(dependencies.access).toHaveBeenCalledWith("/canonical/workspace/WebPin", expect.any(Number));
+    expect(dependencies.access).toHaveBeenCalledWith(
+      "/canonical/workspace/WebPin",
+      constants.R_OK | constants.W_OK
+    );
   });
 
   it("rejects a project path that is not a directory", async () => {
