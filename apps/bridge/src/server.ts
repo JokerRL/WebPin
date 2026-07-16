@@ -167,6 +167,12 @@ function browserSafeAgentRun(run: Awaited<ReturnType<typeof defaultRunCodexTask>
   };
 }
 
+function assertProjectId(annotations: readonly { projectId: string }[], projectId: string): void {
+  if (annotations.some((annotation) => annotation.projectId !== projectId)) {
+    throw new HttpError(409, "project_mismatch", "Annotation project identity does not match this bridge.");
+  }
+}
+
 export type BridgeOptions = BridgeConfig & {
   projectId: string;
   allowedOrigins?: string[];
@@ -243,7 +249,9 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
 
       if (request.method === "POST" && requestUrl.pathname === "/annotations") {
         const body = annotationsRequestSchema.parse(await readJson(request));
-        const annotation = await appendAnnotation(projectPath, body.annotation);
+        const submittedAnnotation = annotationSchema.parse(body.annotation);
+        assertProjectId([submittedAnnotation], projectId);
+        const annotation = await appendAnnotation(projectPath, submittedAnnotation);
         sendJson(response, 201, { annotation });
         return;
       }
@@ -265,6 +273,7 @@ export function createBridgeRequestHandler(options: BridgeOptions) {
 
       if (request.method === "POST" && requestUrl.pathname === "/tasks") {
         const body = tasksRequestSchema.parse(await readJson(request));
+        assertProjectId(body.annotations, projectId);
         const result = await createTaskFiles(projectPath, {
           taskId: body.taskId,
           annotations: body.annotations,

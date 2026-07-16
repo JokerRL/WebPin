@@ -378,18 +378,42 @@ describe("store", () => {
     await mkdir(firstProject);
     await mkdir(secondProject);
 
-    await expect(ensureProjectIdentity(firstProject, () => "project_AAAAAAAAAAAAAAAAAAAAAA"))
-      .resolves.toBe("project_AAAAAAAAAAAAAAAAAAAAAA");
-    await expect(ensureProjectIdentity(secondProject, () => "project_BBBBBBBBBBBBBBBBBBBBBB"))
-      .resolves.toBe("project_BBBBBBBBBBBBBBBBBBBBBB");
-    await expect(ensureProjectIdentity(firstProject, () => "project_CCCCCCCCCCCCCCCCCCCCCC"))
-      .resolves.toBe("project_AAAAAAAAAAAAAAAAAAAAAA");
+    const firstId = await ensureProjectIdentity(firstProject);
+    const secondId = await ensureProjectIdentity(secondProject);
+
+    expect(firstId).not.toBe(secondId);
+    await expect(ensureProjectIdentity(firstProject)).resolves.toBe(firstId);
   });
 
   it("generates a filename-safe opaque identity by default", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
     const projectId = await ensureProjectIdentity(projectPath);
     expect(projectId).toMatch(/^project_[a-zA-Z0-9_-]{22}$/);
+  });
+
+  it("returns one deterministic identity under concurrent initialization", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    const identities = await Promise.all(
+      Array.from({ length: 50 }, () => ensureProjectIdentity(projectPath))
+    );
+    const persisted = JSON.parse(
+      await readFile(join(projectPath, ".ui-annotations", "project.json"), "utf8")
+    );
+
+    expect(new Set(identities)).toEqual(new Set([identities[0]]));
+    expect(persisted.projectId).toBe(identities[0]);
+  });
+
+  it("reuses a persisted identity after the project moves", async () => {
+    const movedProjectPath = await mkdtemp(join(tmpdir(), "ui-annotations-moved-project-"));
+    await ensureAnnotationDirs(movedProjectPath);
+    await writeFile(
+      join(movedProjectPath, ".ui-annotations", "project.json"),
+      JSON.stringify({ projectId: "project_persisted_identity", screenshotCaptureEnabled: false }),
+      "utf8"
+    );
+
+    await expect(ensureProjectIdentity(movedProjectPath)).resolves.toBe("project_persisted_identity");
   });
 
   it("adds identity to legacy settings and preserves it across settings updates", async () => {
@@ -401,12 +425,32 @@ describe("store", () => {
       "utf8"
     );
 
-    const projectId = await ensureProjectIdentity(projectPath, () => "project_DDDDDDDDDDDDDDDDDDDDDD");
+    const projectId = await ensureProjectIdentity(projectPath);
     await updateProjectSettings(projectPath, { screenshotCaptureEnabled: false });
 
-    expect(projectId).toBe("project_DDDDDDDDDDDDDDDDDDDDDD");
+    expect(projectId).toMatch(/^project_[a-zA-Z0-9_-]{22}$/);
     expect(JSON.parse(await readFile(join(projectPath, ".ui-annotations", "project.json"), "utf8")))
       .toEqual({ projectId, screenshotCaptureEnabled: false });
+  });
+
+  it("preserves unknown project metadata while adding identity and updating settings", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+    await ensureAnnotationDirs(projectPath);
+    await writeFile(
+      join(projectPath, ".ui-annotations", "project.json"),
+      JSON.stringify({ screenshotCaptureEnabled: true, futureMetadata: { owner: "local" } }),
+      "utf8"
+    );
+
+    const projectId = await ensureProjectIdentity(projectPath);
+    await updateProjectSettings(projectPath, { screenshotCaptureEnabled: false });
+
+    expect(JSON.parse(await readFile(join(projectPath, ".ui-annotations", "project.json"), "utf8")))
+      .toEqual({
+        screenshotCaptureEnabled: false,
+        futureMetadata: { owner: "local" },
+        projectId
+      });
   });
 
   it("writes annotation screenshot and crop assets inside annotation storage", async () => {

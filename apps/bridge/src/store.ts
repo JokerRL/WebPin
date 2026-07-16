@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, type FileHandle } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { annotationSchema, createTaskPackage, type Annotation } from "@ui-annotations/shared";
@@ -21,6 +21,7 @@ const projectFileSchema = z
     projectId: projectIdSchema.optional(),
     screenshotCaptureEnabled: z.boolean().default(false)
   })
+  .passthrough()
   .default({ screenshotCaptureEnabled: false });
 
 const annotationAssetSchema = z.object({
@@ -226,10 +227,12 @@ export async function readProjectSettings(projectPath: string): Promise<ProjectS
   }
 }
 
-export async function ensureProjectIdentity(
-  projectPath: string,
-  idFactory: () => string = () => `project_${randomBytes(16).toString("base64url")}`
-): Promise<string> {
+function deterministicProjectId(projectPath: string): string {
+  const digest = createHash("sha256").update(resolve(projectPath)).digest("base64url");
+  return `project_${digest.slice(0, 22)}`;
+}
+
+export async function ensureProjectIdentity(projectPath: string): Promise<string> {
   await ensureAnnotationDirs(projectPath);
   const projectFilePath = join(annotationRoot(projectPath), "project.json");
   let projectFile: z.infer<typeof projectFileSchema>;
@@ -241,8 +244,8 @@ export async function ensureProjectIdentity(
   }
   if (projectFile.projectId) return projectFile.projectId;
 
-  const projectId = projectIdSchema.parse(idFactory());
-  await writeManagedFile(projectFilePath, `${JSON.stringify({ projectId, ...projectFile }, null, 2)}\n`);
+  const projectId = projectIdSchema.parse(deterministicProjectId(projectPath));
+  await writeManagedFile(projectFilePath, `${JSON.stringify({ ...projectFile, projectId }, null, 2)}\n`);
   return projectId;
 }
 

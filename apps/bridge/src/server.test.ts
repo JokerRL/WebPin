@@ -14,7 +14,7 @@ const authorizedHeaders = {
 
 const annotation = {
   id: "ann_001",
-  projectId: "sample",
+  projectId: "project_server_test",
   page: {
     url: "http://localhost:3000/settings",
     route: "/settings",
@@ -230,6 +230,23 @@ describe("bridge server", () => {
     expect(events).not.toContain(accessKey);
   });
 
+  it("rejects a mismatched annotation identity before writing annotation or event files", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    const response = await dispatch({
+      projectPath,
+      method: "POST",
+      url: "/annotations",
+      body: JSON.stringify({ annotation: { ...annotation, projectId: "project_other" } })
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json).toMatchObject({ error: "project_mismatch" });
+    await expect(readFile(join(projectPath, ".ui-annotations", "annotations.jsonl"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(projectPath, ".ui-annotations", "events.jsonl"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("reads and updates project settings", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
     const readResponse = await dispatch({ projectPath, method: "GET", url: "/project-settings" });
@@ -329,6 +346,28 @@ describe("bridge server", () => {
       promptPath: ".ui-annotations/tasks/task_001.prompt.md"
     });
     expect(JSON.stringify(response.json)).not.toContain(projectPath);
+  });
+
+  it("rejects mismatched task source identities before creating task files", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-"));
+    const response = await dispatch({
+      projectPath,
+      method: "POST",
+      url: "/tasks",
+      body: JSON.stringify({
+        taskId: "task_mismatch",
+        annotations: [{ ...annotation, projectId: "project_other" }],
+        userIntent: "Align save button.",
+        acceptanceCriteria: ["Button height matches controls."]
+      })
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json).toMatchObject({ error: "project_mismatch" });
+    for (const suffix of ["json", "md", "prompt.md"]) {
+      await expect(readFile(join(projectPath, ".ui-annotations", "tasks", `task_mismatch.${suffix}`), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    }
   });
 
   it("rejects invalid and traversing task request envelopes", async () => {
