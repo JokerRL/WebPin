@@ -2,87 +2,78 @@
 
 ## Snapshot
 
-- Date: 2026-07-02
-- Phase: MVP complete; v1.1 saved annotation management, task generation controls, controlled Codex runner, screenshot/crop evidence capture, and richer task Markdown implemented
-- Primary spec: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`
+- Date: 2026-07-16
+- Phase: MVP stabilization
+- Primary product spec: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`
+- Current security/workflow design: `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`
+- Verification baseline: `CI=true pnpm verify` and `CI=true pnpm test:e2e:extension` passed on 2026-07-16.
 
-## Confirmed Decisions
+## Current Architecture
 
-- Build a Chrome extension for annotating web product prototypes.
-- Use a Local File Bridge for repo-local persistence because Chrome extensions cannot freely write arbitrary local project files.
-- Store annotation data in `.ui-annotations/`.
-- Generate structured AI task packages as JSON and Markdown.
-- Design anchors as three complementary layers:
-  - DOM anchor: selector, XPath, text excerpt, bounding box, URL, viewport.
-  - Source anchor: component, file, line, git commit when available.
-  - Visual anchor: screenshot, crop, visual bounding box.
-- MVP is personal-first.
-- Collaboration, MCP-assisted code editing, iOS simulator verification, and visual diff feedback are later phases.
+- One Local File Bridge process owns one canonical project configured at startup with `UI_ANNOTATIONS_PROJECT_PATH`.
+- The bridge binds to `127.0.0.1`; startup resolves and validates the project before listening.
+- Browser requests never supply or switch the project path.
+- `GET /health` and CORS preflight are public. Protected routes require the per-process key in `X-WebPin-Key`.
+- `Origin` controls CORS response metadata only and is not an authentication credential.
+- Durable project state remains under `.ui-annotations/`.
+- The controlled agent route accepts only a task ID and `agent: "codex"`; it does not accept a command or project path.
 
-## MVP Deliverables
+## Verified on 2026-07-16
 
-- Implemented: TypeScript pnpm workspace.
-- Implemented: shared annotation and task package schemas.
-- Implemented: Local File Bridge store and minimal HTTP API.
-- Implemented: bridge validation for malformed JSON, invalid schemas, project path allowlist, and task id traversal.
-- Implemented: Chrome MV3 extension shell with background health check, content overlay, and side panel shell.
-- Implemented: `file://` content-script support when Chrome's file URL access permission is enabled.
-- Implemented: Option/Alt-click element capture with DOM selector, XPath, text excerpt, bounding box, page URL, route, and viewport metadata.
-- Implemented: side panel annotation form that saves selected element annotations through the Local File Bridge.
-- Implemented: side panel saved annotation list loaded from `.ui-annotations/`.
-- Implemented: saved annotation search, status filter, priority filter, and target platform filter.
-- Implemented: saved annotation status updates through the Local File Bridge.
-- Implemented: saved annotation delete flow that removes annotations from active views and records `annotation.deleted` events.
-- Implemented: side panel task package generation controls for selected saved annotations.
-- Implemented: task prompt file generation at `.ui-annotations/tasks/<task-id>.prompt.md`.
-- Implemented: controlled `POST /agent-runs` bridge endpoint for `agent: "codex"`.
-- Implemented: fixed-shape Codex execution via `codex exec --sandbox workspace-write`.
-- Implemented: run records under `.ui-annotations/runs/`.
-- Implemented: side panel execution prompt templates for Web, iOS SwiftUI, cross-platform parity, UI QA fixes, and planning-only runs.
-- Implemented: project-level screenshot capture setting stored in `.ui-annotations/project.json`.
-- Implemented: screenshot and crop asset upload through a narrow Local File Bridge endpoint.
-- Implemented: visual anchors can reference local screenshot and crop evidence under `.ui-annotations/assets/`.
-- Implemented: task Markdown includes evidence, target platforms, suggested files, anchor summaries, and suggested next steps for Codex-oriented handoff.
-- Implemented: sample prototype fixture.
-- Implemented: project-file annotation storage and task package generation through bridge store/API.
-- Not yet implemented: visual region drawing, source anchor extraction, async/background agent queue, and automated browser-level extension checks.
+Fresh local verification established the following:
 
-## MVP Non-Goals
+- Type checks, production builds, and 103 unit/API tests across 20 test files passed.
+- The packaged MV3 extension loaded in Chromium and authenticated with the startup key.
+- The panel reached `Ready` only after a successful authenticated session.
+- Inline element selection created an annotation in the pending list.
+- Saving wrote `annotations.jsonl`; an authenticated `GET /annotations` reloaded it without a project-path query.
+- Status update and delete operations persisted and were reflected after refresh.
+- Task generation emitted matching JSON, Markdown, and Codex prompt files.
+- The packaged test completed without browser console or page errors.
 
-- Cloud backend.
-- Multi-user collaboration.
-- Direct iOS code modification.
-- Guaranteed web-to-iOS component mapping.
-- Full Figma integration.
-- Chrome Web Store publishing.
+The implementation also has automated unit/API coverage for:
 
-## Completed Implementation Plan
+- Required absolute, readable, writable canonical project configuration.
+- Timing-safe startup-key validation and non-sensitive session metadata.
+- Strict request schemas that reject obsolete browser `projectPath` input.
+- Static symbolic links in the managed annotation directory tree.
+- Sequential save acknowledgement, partial failure, retry behavior, duplicate IDs, and refresh failure after acknowledgement.
+- Serialized concurrent pending-list mutations in the background owner and recovery after a failed Chrome storage write.
+- Browser-safe agent responses containing only `runId` and `status`, while full run records remain local.
 
-The implementation plan is available at `docs/superpowers/plans/2026-07-01-chrome-ui-annotation-ai-task-implementation-plan.md`.
+## Implemented Product Capabilities
 
-It implemented these independently verifiable tasks:
+- MV3 extension shell, side panel, content overlay, keyboard command, and `file://` support when Chrome permission is enabled.
+- DOM element capture with selector, XPath, text excerpt, bounding box, page URL/route/title, and viewport metadata.
+- Inline annotation editing and pending annotation persistence.
+- Saved annotation search and filters, status updates, deletion, and append-only event traceability.
+- Task package generation as `.json`, `.md`, and `.prompt.md`.
+- Prompt templates for web, SwiftUI, cross-platform parity, UI QA, and planning work.
+- Configurable screenshot and crop capture with narrow local asset writes. This path remains default-off because captures may be sensitive.
+- Controlled synchronous Codex execution with complete local run records.
+- GitHub Actions jobs for fast verification and isolated packaged-extension Chromium verification.
 
-1. Workspace scaffolding.
-2. Shared schema package.
-3. Local File Bridge.
-4. Chrome extension content script.
-5. Chrome extension panel UI.
-6. Bridge integration.
-7. Task package generation.
-8. End-to-end verification flow.
-9. Documentation updates.
+## Remaining Product Work
 
-## Open Questions For Implementation Planning
+1. Harden packaged-browser coverage for screenshot capture, Chrome `activeTab` grants, and crop output.
+2. Add visual-region drawing for feedback that is not tied to one DOM element.
+3. Add source-anchor extraction.
+4. Implement DOM snapshot capture; only its storage directory is currently reserved.
+5. Replace synchronous Codex HTTP execution with an asynchronous queue and polling model.
+6. Decompose the large panel `App` into narrower components and hooks.
 
-- How the first project binding UI should choose and persist local project paths.
-- Which browser-level manual checks should be automated first for screenshot/crop capture.
-- How much annotation state should live in Chrome storage before bridge persistence.
-- How task package generation should group multiple annotations.
-- Which browser-level manual checks should be automated first.
+## Residual Risks and Follow-ups
 
-## Recommended Next Slice
+- Static managed-directory symbolic links are rejected, including links introduced before a write. A hostile local process that swaps a parent directory between validation and file I/O remains a time-of-check/time-of-use limitation of the current portable high-level Node filesystem approach. This is proportionate to the personal-use, same-machine MVP threat model, but it is not a claim of safety under adversarial concurrent filesystem mutation.
+- Pending mutations are serialized through the extension background owner. Chrome storage still offers no atomic compare-and-remove primitive, leaving a narrow window if another independent actor mutates the same key outside that owner.
+- Task response paths use Node's platform-native separator; Windows browser responses may contain backslashes. This is a minor portability cleanup.
+- Bridge tests cover representative authentication, schema, response-sanitization, and error cases. A table-driven every-route auth matrix, empty-patch policy assertions, and richer error-metadata assertions would improve coverage but are not current workflow blockers.
+- Screenshot assets and full Codex run records are local but may contain sensitive data. They should remain excluded from remote storage unless a future design explicitly adds it.
 
-1. Add visual region drawing for non-DOM-specific feedback.
-2. Add source anchor extraction from common prototype metadata attributes.
-3. Upgrade the controlled Codex runner from synchronous HTTP execution to a background queue with polling.
-4. Add manual and automated end-to-end browser verification, including screenshot/crop capture checks.
+## Scope Boundaries
+
+- No cloud backend, accounts, multi-user collaboration, assignments, comments, or live sync.
+- No browser-selected project path.
+- No arbitrary shell commands through the bridge.
+- No direct iOS code modification from the extension.
+- No assumption that DOM elements map one-to-one to SwiftUI components.

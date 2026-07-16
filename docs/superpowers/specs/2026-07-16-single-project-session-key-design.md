@@ -3,54 +3,51 @@
 ## Status
 
 - Date: 2026-07-16
-- State: Approved for implementation planning
-- Scope: Local File Bridge authentication, active project selection, path safety, extension connection state, and browser-level verification
+- State: Implemented and verified
+- Scope: Local File Bridge authentication, canonical project selection, path safety, extension connection state, pending-write integrity, and packaged-browser verification
 
 ## Context
 
-WebPin currently accepts a `projectPath` from every browser request and combines a global origin allowlist with a global project-root allowlist. Real Chromium verification exposed a compatibility failure: extension GET requests to `/annotations` and `/project-settings` omit the `Origin` header, so the bridge rejects them with `403 origin_not_allowed` even though POST annotation writes succeed. The panel therefore reports the bridge as connected while saved annotations cannot be loaded.
+The earlier bridge accepted a browser-supplied `projectPath` and treated an origin allowlist as authorization. Real Chromium exposed the central reliability flaw: extension GET requests could omit `Origin`, so annotation writes appeared to work while saved annotations and project settings failed to load. The browser also held unnecessary authority over local filesystem selection, and lexical path checks did not stop a configured in-root symbolic link from redirecting managed writes.
 
-The current path checks are lexical. A project path inside an allowed root can be a symbolic link to a directory outside that root, allowing `.ui-annotations/` writes outside the intended boundary.
+WebPin's MVP is a personal, same-machine tool. It does not need multi-project switching within one bridge process, accounts, cloud identity, or a pairing protocol. The implemented repair reduces browser authority and gives the panel a truthful authenticated session state.
 
-The MVP is primarily for one local user and does not need multi-project switching, accounts, cloud identity, or a high-friction pairing protocol. The repair should make the primary workflow reliable while reducing the browser's authority over filesystem paths.
+## Goals and Boundaries
 
-## Goals
+The design:
 
-1. Make extension GET and write requests reliable without depending on an `Origin` header.
-2. Restrict each bridge process to one explicitly configured local project.
-3. Remove `projectPath` from browser-controlled API payloads and query parameters.
-4. Protect bridge APIs with a simple per-process access key.
-5. Surface truthful connection states in the extension panel.
-6. Reject symbolic-link layouts that could redirect `.ui-annotations/` writes.
-7. Prove the repaired workflow with a packaged-extension Chromium test.
+1. Makes extension GET and write requests independent of the presence of an `Origin` header.
+2. Restricts each bridge process to one explicitly configured canonical project.
+3. Removes project paths from browser API inputs.
+4. Authenticates protected requests with a per-process key.
+5. Distinguishes offline, key-required, and authenticated-ready states.
+6. Rejects static symbolic links in the managed annotation directory tree.
+7. Preserves pending annotations through partial writes and authentication failures.
+8. Verifies the real built MV3 extension in Chromium.
 
-## Non-Goals
+This slice does not add persistent accounts, remote access, multi-project switching, cloud storage, collaboration, visual-region drawing, source anchors, DOM snapshot capture, screenshot `activeTab` browser coverage, or an asynchronous Codex queue.
 
-- Persistent user accounts or cloud authentication.
-- Multiple simultaneous project bindings in one bridge process.
-- A browser-to-bridge pairing code protocol.
-- Long-lived access-key rotation or recovery workflows.
-- Remote bridge access.
-- Multi-user permissions or collaboration.
-- Implementing visual region capture, source anchors, DOM snapshots, or the asynchronous Codex runner in this slice.
+## Implemented Decisions
 
-## Approved Product Decisions
+### One canonical project per bridge process
 
-### One active project per bridge process
+The bridge requires this startup form:
 
-The bridge requires `UI_ANNOTATIONS_PROJECT_PATH` at startup. The value must be an existing, writable, absolute directory. The bridge resolves it to a canonical physical path once and uses that path for every store operation.
+```bash
+UI_ANNOTATIONS_PROJECT_PATH=/absolute/project/path pnpm dev:bridge
+```
 
-The browser cannot provide, override, or switch the project path. To work on another project, the user starts another bridge process with a different project path.
+Before listening, startup requires an absolute existing directory, resolves it with `realpath`, confirms it is a readable and writable directory, validates the managed annotation directories, and generates a random access key. The resolved path is injected into every store operation. The browser cannot provide, override, or switch it.
+
+To work on another project, the user stops the bridge and starts a bridge process configured for that project.
 
 ### Per-process startup access key
 
-The bridge generates a cryptographically random access key at startup and prints it to the terminal. The user pastes the complete key into the extension panel.
+The bridge generates a cryptographically random key and prints it with the local listening URL and project basename. The user pastes the full key into the extension panel.
 
-The key exists only in bridge memory and Chrome local storage. It is not written to `.ui-annotations/`, project logs, event records, task packages, or run records. A bridge restart generates a new key. When the extension receives `401 invalid_access_key`, it removes the stale key while preserving pending annotations.
+The key exists in bridge memory and Chrome local storage. It is not intentionally written to annotation, event, task, or run records. A restart generates a new key. When the current key is rejected, the extension clears the stale key and project-name credential only if they still match the failed attempt, preserving pending annotations and avoiding an older request clearing a newer successful session.
 
-An optional fixed environment key is not part of this implementation. It can be added later if repeated local startup proves too inconvenient.
-
-### Header authentication instead of Origin authentication
+### Header authentication; Origin only for CORS
 
 Every protected request carries:
 
@@ -58,36 +55,15 @@ Every protected request carries:
 X-WebPin-Key: <startup access key>
 ```
 
-`Origin` remains useful CORS metadata but is not an authentication credential. The bridge allows `content-type` and `x-webpin-key` during preflight.
+`GET /health` and CORS `OPTIONS` are public. All other routes require the key. Comparison uses equal-length buffers and `timingSafeEqual`. Missing or incorrect keys receive `401 invalid_access_key` without echoing submitted credentials.
 
-Only `GET /health` and CORS `OPTIONS` are public. All other endpoints require the access key.
+`Origin` is used only to decide whether to return an `Access-Control-Allow-Origin` header. It is not authorization. Preflight permits `content-type` and `x-webpin-key`.
 
-## Startup Behavior
+## HTTP Contract
 
-The development command becomes:
+### Public health
 
-```bash
-UI_ANNOTATIONS_PROJECT_PATH=/absolute/project/path pnpm dev:bridge
-```
-
-Startup performs these checks before listening:
-
-1. The environment variable exists.
-2. The configured path is absolute.
-3. The directory exists and resolves through `realpath`.
-4. The resolved directory is readable and writable.
-5. `.ui-annotations/` and its managed subdirectories are real directories, not symbolic links.
-6. A random access key is generated.
-
-On success the terminal prints the listening URL, active project name, and startup key. It may print the project basename, but normal HTTP responses must not expose the absolute path or access key.
-
-On configuration or filesystem failure, the process exits non-zero before opening the port. The bridge must not enter a partially usable state.
-
-## HTTP API
-
-### Public health endpoint
-
-`GET /health` returns only service availability and the authentication requirement:
+`GET /health` reports only service availability and the authentication scheme:
 
 ```json
 {
@@ -96,11 +72,11 @@ On configuration or filesystem failure, the process exits non-zero before openin
 }
 ```
 
-This endpoint does not claim that a particular extension client is ready.
+It does not establish an authenticated client session.
 
-### Authenticated session endpoint
+### Authenticated session
 
-`GET /session` verifies the access key and returns non-sensitive active-project metadata:
+`GET /session` returns non-sensitive project metadata after key validation:
 
 ```json
 {
@@ -109,9 +85,9 @@ This endpoint does not claim that a particular extension client is ready.
 }
 ```
 
-### Protected existing endpoints
+### Protected routes
 
-The following endpoints require `X-WebPin-Key` and use the bridge's canonical active project internally:
+The canonical server-owned project is used by:
 
 - `GET /annotations`
 - `POST /annotations`
@@ -123,48 +99,48 @@ The following endpoints require `X-WebPin-Key` and use the bridge's canonical ac
 - `POST /tasks`
 - `POST /agent-runs`
 
-All `projectPath` query parameters and request fields are removed. Request schemas are strict so a stale client that sends `projectPath` receives `400 invalid_schema` rather than silently continuing.
+Request schemas are strict. A `projectPath` request field or query parameter is rejected instead of ignored.
 
-### Authentication errors
-
-Missing or incorrect keys return:
+The controlled agent request accepts only:
 
 ```json
 {
-  "error": "invalid_access_key",
-  "message": "Enter the current bridge access key in the extension."
+  "taskId": "task_001",
+  "agent": "codex"
 }
 ```
 
-The status is `401`. Key comparison uses equal-length buffers and a timing-safe comparison. The implementation never includes the submitted key in an error or log message.
+The browser receives only `{ "run": { "runId": "...", "status": "completed" } }` (or `failed`). Command arguments, output, prompt path, task ID, timestamps, and exit details remain in the local `.ui-annotations/runs/<run-id>.json` record.
 
 ## Extension Connection Model
 
-The panel uses three user-facing states:
-
-| State | Meaning | Primary action |
+| State | Meaning | User action |
 |---|---|---|
-| `offline` | `/health` cannot be reached | Start the bridge and retry |
-| `key-required` | Bridge is online but no valid key is available | Paste the terminal key |
-| `ready` | `/session` accepted the current key | Use annotation and task features |
+| `offline` | Public health cannot be reached | Start the bridge and retry |
+| `key-required` | The bridge is online but no valid key is active | Paste the printed key and connect |
+| `ready` | `/session` accepted the current key | Use protected annotation and task controls |
 
-The panel no longer labels a successful health request as fully connected.
+The panel does not report `ready` based on `/health`. Latest-attempt gating prevents a stale connection attempt from overwriting newer connection state. A successful session stores the project name and removes the obsolete project-path storage key.
 
-The access key is stored in Chrome local storage so restarting Chrome does not require re-entry while the same bridge process remains alive. A `401` clears only the key and connection state. Pending annotations and the most recent selection remain intact.
+Pending annotations are associated with a project-derived ID. The panel blocks saving a pending batch when it belongs to a different authenticated project rather than silently writing it into the current project.
 
-All bridge requests go through one extension client module. That module adds `X-WebPin-Key`, parses JSON errors, distinguishes network failures from authentication failures, and provides typed methods for annotations, settings, assets, tasks, and agent runs.
+## Pending Save and Mutation Semantics
 
-## Save Semantics
+Pending writes are sequential and acknowledgement-only:
 
-Saving pending annotations remains sequential so the panel can identify which item failed. After each `201` response, that annotation is removed from the pending list immediately. If a later write fails, only the unsaved remainder stays pending. Retrying therefore does not append another copy of already confirmed annotations.
+1. The panel takes a snapshot of the current pending list.
+2. It sends one annotation to the bridge.
+3. Only after a `201` response does it ask the background owner to acknowledge that annotation ID.
+4. The background owner removes the first matching item from the current stored list and returns the new current state.
+5. The panel renders that returned current state; it does not replace storage with a stale calculated remainder.
 
-Loading the saved list after a partial success is best-effort. A refresh failure must not restore annotations already acknowledged by the bridge.
+If a later write fails, confirmed annotations stay removed and the unsaved remainder stays pending. Duplicate IDs are removed one acknowledged occurrence at a time. A saved-list refresh failure after the final acknowledgement does not resurrect confirmed pending items.
 
-## Filesystem Safety
+All background pending-list appends and removals share one serialized promise chain. Each operation reads the latest Chrome storage array immediately before mutation, writes the result, and leaves the chain usable after a rejected storage write. This protects concurrent panel/content operations inside the background owner.
 
-The bridge stores one canonical project root created with `realpath` at startup. Store functions receive this trusted path from server configuration instead of accepting a path from request data.
+## Filesystem Safety and Threat Model
 
-Before creating or writing managed directories, the store checks each existing path component with `lstat`. The following managed directories must not be symbolic links:
+The server passes one canonical startup path to the store. Managed locations are checked with `lstat` and must be real directories:
 
 - `.ui-annotations/`
 - `.ui-annotations/tasks/`
@@ -174,84 +150,42 @@ Before creating or writing managed directories, the store checks each existing p
 - `.ui-annotations/assets/crops/`
 - `.ui-annotations/assets/dom-snapshots/`
 
-New directories are created normally and checked again before use. File paths continue to use containment checks against the canonical annotation root. A detected symbolic link causes the operation to fail without following the link.
+Directory creation handles concurrent `EEXIST` races, then checks the resulting entry. Task, asset, and run filenames also use narrow validation and containment checks.
 
-## Code Boundaries
+This prevents a static symbolic-link layout from redirecting a managed write. It does not make file operations race-free under hostile concurrent local filesystem mutation: another process with access could swap a parent directory after validation but before the subsequent I/O. Closing that parent-directory time-of-check/time-of-use gap requires lower-level descriptor-relative operations or a different platform-specific storage boundary. The current protection is proportionate to WebPin's personal-use, same-user threat model and must not be described as safe against an adversarial concurrent filesystem actor.
 
-### Bridge
+## Screenshot Boundary
 
-- `apps/bridge/src/config.ts`: startup environment parsing, canonical project validation, writeability checks, and random key creation.
-- `apps/bridge/src/auth.ts`: key extraction and timing-safe validation.
-- `apps/bridge/src/server.ts`: route definitions and dependency injection of the active project configuration.
-- `apps/bridge/src/store.ts`: store operations against a trusted project root plus managed-directory symbolic-link checks.
+Project-level screenshot/crop capture is implemented and configurable, defaulting off. Asset writes use an authenticated narrow image endpoint and local relative paths. Because screenshots may contain sensitive information, they remain local.
 
-### Extension
+The packaged browser test intentionally does not assert screenshot capture. Chrome `activeTab` grant behavior and crop verification require a separate interaction/hardening design.
 
-- `apps/extension/src/bridge-client.ts`: authenticated typed HTTP client and normalized errors.
-- `apps/extension/src/panel/connection.ts`: connection-state transitions and access-key storage behavior.
-- `apps/extension/src/panel/App.tsx`: renders connection controls and delegates bridge operations to the client. Broader panel decomposition remains a later task.
-- `apps/extension/src/background.ts`: uses the shared bridge client contract for asset uploads and inline annotation state.
+## Implementation Verification
 
-## Testing Strategy
+Verified on 2026-07-16 with:
 
-### Bridge unit and API tests
+```bash
+CI=true pnpm verify
+CI=true pnpm test:e2e:extension
+git diff --check
+```
 
-- Reject a missing project environment variable.
-- Reject a relative, missing, or non-writable project directory.
-- Resolve and retain the canonical active project path.
-- Generate a non-empty random startup key.
-- Reject missing and incorrect access keys for every protected route.
-- Accept a correct key for GET and write routes.
-- Confirm `/health` is public and `/session` is protected.
-- Reject obsolete `projectPath` fields and query parameters.
-- Verify that the access key never appears in responses or run/event files.
-- Reproduce a project or managed-directory symbolic-link escape and verify rejection.
+Evidence from the fresh run:
 
-### Extension unit tests
+- Type checks passed for the shared, bridge, and extension packages.
+- 20 test files passed with 103 unit/API tests: shared 3, bridge 43, extension 57.
+- Shared, bridge, and extension production builds passed.
+- Packaged Chromium loaded the real MV3 extension and completed key authentication, inline selection, pending save, authenticated GET reload, status update, task JSON/Markdown/prompt generation, and delete/refresh.
+- The packaged run reported no browser console or page errors.
 
-- Add `X-WebPin-Key` to every protected request.
-- Map network failure to `offline`.
-- Map missing or rejected key to `key-required`.
-- Map a successful `/session` response to `ready`.
-- Clear only the stale key on `401`.
-- Preserve pending annotations across authentication failures.
-- Remove pending annotations one by one after confirmed writes.
+GitHub Actions enforces the same outcomes on push and pull request with a fast `pnpm verify` job and a separate isolated Chromium job that installs the browser with system dependencies before running `pnpm test:e2e:extension`.
 
-### Packaged-extension Chromium test
+## Acceptance Criteria Result
 
-The automated test starts a bridge against a temporary project, loads the built MV3 extension, supplies the startup key, and verifies this sequence:
-
-1. The panel reports `ready`.
-2. Selection mode highlights a sample element.
-3. An inline annotation is added to pending storage.
-4. Saving writes `annotations.jsonl`.
-5. A GET refresh displays the saved annotation.
-6. Status update and deletion work.
-7. A selected saved annotation generates JSON, Markdown, and prompt task files.
-
-Screenshot permission and crop behavior are tested in a later screenshot-hardening slice because automated `activeTab` grants require a separate browser interaction design.
-
-## Migration
-
-This is a breaking local API change for version `0.1.0`. No compatibility layer is required.
-
-Existing `.ui-annotations/` data remains valid. The migration changes only bridge startup, request authentication, and removal of browser-supplied project paths. Chrome storage keys for pending annotations and last selection remain valid. The existing stored project path is ignored and removed after the first successful authenticated session.
-
-## Documentation Updates During Implementation
-
-Implementation must update:
-
-- `README.md` with the new startup and key-entry workflow.
-- `docs/PROJECT_STATUS.md` with the corrected MVP status and verified browser flow.
-- The implementation plan under `docs/superpowers/plans/`.
-- Extension manual-check instructions so `Bridge ready` means authenticated session readiness.
-
-## Acceptance Criteria
-
-1. The browser cannot select a project path through any HTTP request.
-2. All protected endpoints reject requests without the current startup key.
-3. A real extension GET request can load saved annotations after key entry.
-4. The panel never reports `ready` based only on `/health`.
-5. A symbolic link cannot redirect managed annotation writes outside the canonical project root.
-6. Pending annotations survive offline and authentication failures without duplicating confirmed writes.
-7. Type checks, all unit/API tests, builds, and the packaged-extension Chromium workflow pass.
+1. Browser requests cannot select a project path: verified by strict API tests and the packaged GET request.
+2. Protected routes require the current startup key: implemented and covered by authentication/API tests.
+3. The packaged extension can load saved annotations after key entry: verified in Chromium.
+4. The panel reaches `ready` only after `/session`: implemented and covered by unit plus browser tests.
+5. Static managed-directory symbolic links are rejected: covered by store regressions, with the concurrent-swap residual documented above.
+6. Offline/auth failures and partial saves preserve unacknowledged pending work without duplicating acknowledged writes: covered by pending-save, credential, and mutation tests.
+7. Type checks, unit/API tests, builds, and packaged Chromium verification pass: verified on 2026-07-16.

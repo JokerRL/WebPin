@@ -1,149 +1,133 @@
-# Chrome UI Annotation and AI Task Package
+# WebPin: Chrome UI Annotation and AI Task Packages
 
-This project defines and will implement a Chrome-based annotation workflow for reviewing web product prototypes and turning UI feedback into structured AI task packages.
+WebPin is a local-first Chrome extension for a solo product builder. It captures feedback on web prototypes, stores annotations beside one configured project, and generates structured JSON, Markdown, and Codex prompt task files.
 
 ## Current Status
 
-- Product direction is approved.
-- PRD is written at `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`.
-- MVP has been implemented and verified for local prototype annotation, repo-local storage, and structured AI task package generation.
-- v1.1 is underway: the side panel can load saved annotations from `.ui-annotations/`, filter them, update status, delete active annotations with event traceability, generate richer task package files from selected annotations, send generated tasks to Codex through a controlled local runner, and optionally capture local screenshot/crop evidence per project.
+WebPin is in **MVP stabilization**. The authenticated single-project flow is implemented and verified: the packaged extension can select an element, save and reload an annotation, update its status, delete it, and generate task files through the Local File Bridge.
 
-## MVP Scope
-
-The MVP is a personal workflow tool for a solo product builder:
-
-1. Open a local or hosted web prototype.
-2. Enable Chrome annotation mode.
-3. Select a DOM element or draw a visual region.
-4. Add a structured annotation.
-5. Review annotations in a live list.
-6. Persist annotation data into the project repository under `.ui-annotations/`.
-7. Generate structured AI task packages for Codex or future MCP workflows.
+Screenshot and crop capture is implemented and configurable because pages may contain sensitive information. Automated browser coverage for Chrome's `activeTab` grant and crop behavior remains a hardening task. Visual-region drawing, source-anchor extraction, and DOM snapshot capture are not implemented.
 
 ## Architecture
 
-The approved MVP architecture is **Chrome Extension + Local File Bridge**.
+The MVP uses a **Chrome Extension + Local File Bridge**:
 
-- **Chrome Extension**
-  - Injects annotation UI into prototype pages.
-  - Highlights hovered elements.
-  - Captures DOM, visual, page, and optional source anchors.
-  - Provides a side panel or popup for annotation management.
+- The extension provides the element-selection overlay, inline editor, side panel, pending list, saved-annotation controls, and task-package controls.
+- The bridge binds to `127.0.0.1` and owns one canonical project chosen at process startup with `UI_ANNOTATIONS_PROJECT_PATH`.
+- The browser never sends or selects a filesystem path. Every protected request uses the startup access key in `X-WebPin-Key`.
+- `Origin` is used only for CORS response metadata; it is not authorization.
+- Project data is stored under the configured project's `.ui-annotations/` directory.
+- The bridge does not accept arbitrary shell commands. Its optional agent endpoint invokes only the fixed Codex runner for an existing generated task prompt.
 
-- **Local File Bridge**
-  - Runs locally on `127.0.0.1`.
-  - Binds browser origins or URL patterns to local project paths.
-  - Writes validated annotation files under `.ui-annotations/`.
-  - Writes screenshot and crop assets only through a narrow image asset endpoint.
-  - Generates JSON, Markdown, and Codex prompt task files.
-  - Does not execute arbitrary shell commands.
-  - Can run only a whitelisted Codex task command for generated task packages.
+The local store uses this layout:
 
-- **Project Annotation Store**
-  - `.ui-annotations/project.json`
-  - `.ui-annotations/annotations.jsonl`
-  - `.ui-annotations/events.jsonl`
-  - `.ui-annotations/tasks/*.json`
-  - `.ui-annotations/tasks/*.md`
-  - `.ui-annotations/tasks/*.prompt.md`
-  - `.ui-annotations/runs/*.json`
-  - `.ui-annotations/assets/screenshots/*`
-  - `.ui-annotations/assets/crops/*`
-  - `.ui-annotations/assets/dom-snapshots/*`
+```text
+.ui-annotations/
+  project.json
+  annotations.jsonl
+  events.jsonl
+  tasks/
+    <task-id>.json
+    <task-id>.md
+    <task-id>.prompt.md
+  runs/
+    <run-id>.json
+  assets/
+    screenshots/
+    crops/
+    dom-snapshots/
+```
 
-## Non-Goals For MVP
+The `dom-snapshots/` directory is reserved by the storage layout; capture is not yet implemented.
 
-- No cloud backend.
-- No multi-user collaboration.
-- No direct iOS code modification.
-- No guaranteed web-to-iOS component mapping.
-- No full Figma integration.
-- No Chrome Web Store publishing requirement.
+## Install and Verify
 
-## Roadmap
+```bash
+CI=true pnpm install --frozen-lockfile
+CI=true pnpm verify
+pnpm test:e2e:install
+CI=true pnpm test:e2e:extension
+```
 
-- **MVP**: Annotation capture, project-file storage, structured AI task packages.
-- **v1.1**: Saved annotation management, task package generation controls, Codex prompt generation, suggested files, patch proposal drafts.
-- **v1.5**: MCP-assisted edits with human approval and build/test hooks.
-- **v2.0**: Web-to-iOS mapping, XcodeBuildMCP simulator verification, visual diff feedback.
+`pnpm verify` runs type checks, unit/API tests, and production builds. The packaged-extension test builds the shared package, extension, and bridge, then loads the MV3 extension in Chromium and exercises the authenticated annotation flow. If Chromium installation needs system packages in CI, use `pnpm exec playwright install --with-deps chromium`.
 
-## Development Commands
+## Solo User Workflow
 
-- Install dependencies: `CI=true pnpm install`
-- Run bridge: `pnpm dev:bridge`
-- Run bridge for a prototype outside this repository: `UI_ANNOTATIONS_ALLOWED_PROJECT_ROOTS=/absolute/project/path pnpm dev:bridge`
-- Build extension: `CI=true pnpm --filter @ui-annotations/extension build`
-- Verify all packages: `CI=true pnpm verify`
-- Check Codex CLI: `codex --version`
+1. Build the extension:
 
-## File Prototype Annotation Workflow
+   ```bash
+   CI=true pnpm --filter @ui-annotations/extension build
+   ```
 
-1. Build the extension with `CI=true pnpm --filter @ui-annotations/extension build`.
-2. Load `apps/extension/dist` as an unpacked Chrome extension.
-3. In Chrome extension details for **UI Annotations**, enable **Allow access to file URLs**.
-4. Start the bridge from this repository if annotations should be written here:
-   `pnpm dev:bridge`
-5. If annotations should be written next to another prototype, start the bridge with that project root explicitly allowed:
-   `UI_ANNOTATIONS_ALLOWED_PROJECT_ROOTS=/Users/joker/Desktop/familyLocator/prototype pnpm dev:bridge`
-6. Open the local prototype, for example `file:///Users/joker/Desktop/familyLocator/prototype/app.html#welcome`.
-7. Open the extension side panel and confirm `Bridge: connected`.
-8. Leave **Capture screenshot and crop** off for sensitive pages, or enable it to write local evidence under `.ui-annotations/assets/`.
-9. Click **Select element** in the side panel, or press `Ctrl+Shift+Y` (`MacCtrl+Shift+Y` on macOS).
-10. Click the UI element to annotate. The extension enters edit mode and blocks page click/navigation handlers while selecting and editing.
-11. Use the inline popup beside the selected element to enter the note, type, priority, and target platforms, then click **Save**. This adds the annotation to the side panel's pending list.
-12. Review the side panel's **Pending annotations** list, then click **Save all to files** to append the list to `.ui-annotations/annotations.jsonl`.
-13. Use **Saved annotations** to refresh from project files, filter saved annotations, update status, delete active annotations, and select annotations for task generation.
-14. Use **Task package** to draft a task from selected annotations, apply a prompt template, edit the intent and acceptance criteria, and generate `.ui-annotations/tasks/<task-id>.json`, `.md`, and `.prompt.md`.
-15. Click **Send to Codex** to run the generated prompt through the controlled local Codex runner.
+2. Load `apps/extension/dist` as an unpacked extension in Chrome. For `file://` prototypes, enable **Allow access to file URLs** in the extension details.
 
-Saved annotations are appended to `.ui-annotations/annotations.jsonl` under the chosen project path, with an event in `.ui-annotations/events.jsonl`.
+3. Start the bridge for exactly one project:
 
-When screenshot capture is enabled, the bridge stores `assets/screenshots/<annotation-id>.png` and `assets/crops/<annotation-id>.png` locally and records their paths in the annotation's visual anchor. Generated task Markdown includes evidence paths, target platforms, suggested files, anchor summaries, and suggested next steps.
+   ```bash
+   UI_ANNOTATIONS_PROJECT_PATH=/absolute/project/path pnpm dev:bridge
+   ```
+
+   The path must be an existing readable and writable directory. The bridge resolves it once to a canonical path before listening.
+
+4. Copy the access key printed by the bridge.
+5. Open the extension side panel, paste the key, and click **Connect**.
+6. Confirm the panel shows **Ready** and the configured project name. A public health response alone does not make the panel ready.
+7. Open the prototype page and click **Select element**, or use `Ctrl+Shift+Y` (`MacCtrl+Shift+Y` on macOS).
+8. Click an element, enter the note, change type, priority, and target platforms in the inline editor, then click **Save**. The annotation enters the pending list.
+9. Review pending annotations and click **Save all to files**. Each confirmed write is acknowledged individually; a failed remainder stays pending for retry.
+10. Use **Saved annotations** to refresh from disk, filter, change status, delete active annotations, and choose annotations for task generation.
+11. Use **Task package** to set a task ID, intent, acceptance criteria, prompt template, and suggested files, then generate the JSON, Markdown, and prompt files.
+
+Restarting the bridge generates a new access key. Paste the new key and reconnect; stale credentials are cleared without intentionally clearing pending annotations.
+
+### Optional screenshot and crop evidence
+
+Screenshot capture defaults off and can be enabled in the panel for the configured project. When enabled, the existing capture path can write local files under `.ui-annotations/assets/screenshots/` and `.ui-annotations/assets/crops/` and add their relative paths to the visual anchor. Treat this as sensitive local data. The packaged Chromium test does not yet exercise Chrome's `activeTab` permission and crop behavior.
 
 ## Controlled Codex Runner
 
-The bridge exposes `POST /agent-runs` for one narrow automation path:
+`POST /agent-runs` accepts only this authenticated body:
 
 ```json
 {
-  "projectPath": "/absolute/project/path",
   "taskId": "task_001",
   "agent": "codex"
 }
 ```
 
-The bridge validates the project path and task id, reads `.ui-annotations/tasks/<task-id>.prompt.md`, and runs Codex with a fixed argument shape:
+The browser cannot provide a project path, command, arguments, prompt text, or working directory. The bridge validates the task ID, reads `.ui-annotations/tasks/<task-id>.prompt.md`, and invokes:
 
 ```bash
 codex exec --sandbox workspace-write "<prompt file contents>"
 ```
 
-Run results are written to `.ui-annotations/runs/<run-id>.json`. The browser cannot submit arbitrary commands.
+The HTTP response exposes only the run ID and final status. The complete run record, including command result details, stays local under `.ui-annotations/runs/<run-id>.json`.
 
-## Prompt Templates
+## Implemented and Remaining Scope
 
-The side panel includes execution prompt templates. Annotation notes describe what should change; templates describe who the agent should act as, how to parse task JSON/Markdown, how to use anchors, how to implement, and how to report verification.
+Implemented in the stabilized flow:
 
-- Web frontend implementer
-- iOS SwiftUI implementer
-- Web + iOS parity implementer
-- UI QA fixer
-- Implementation planner
+- DOM element selection with selector, XPath, text excerpt, bounding box, page, and viewport metadata.
+- Pending annotations with sequential acknowledgement and serialized background storage mutations.
+- Saved annotation loading, filtering, status updates, and deletion event traceability.
+- JSON, Markdown, and prompt task-package generation.
+- Configurable local screenshot/crop capture path.
+- Fixed-shape local Codex execution for generated prompts.
+- Packaged MV3 Chromium verification and CI enforcement.
 
-Select saved annotations, choose a template, then click **Apply** to fill the task intent and acceptance criteria before generating task files. The generated intent includes parsing instructions for task package fields, DOM anchors, visual anchors, source anchors, target platforms, and suggested files.
+Remaining work includes visual-region drawing, source anchors, DOM snapshot capture, screenshot `activeTab`/crop browser hardening, an asynchronous Codex queue, and broader decomposition of the panel application.
 
-## Manual Extension Check
+## Non-Goals for MVP
 
-1. Run `CI=true pnpm verify`.
-2. Run the bridge with `pnpm dev:bridge`.
-3. Serve `examples/sample-project/` with a local static server.
-4. Load `apps/extension/dist` as an unpacked Chrome extension.
-5. Open the sample page and confirm hovered elements receive a green overlay.
+- No cloud backend or remote screenshot storage.
+- No accounts, multi-user collaboration, assignments, comments, or live sync.
+- No direct iOS source modification from the extension.
+- No guaranteed DOM-to-SwiftUI component mapping.
+- No arbitrary shell-command execution from the bridge.
 
 ## Key Documents
 
-- PRD: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`
-- Implementation plan: `docs/superpowers/plans/2026-07-01-chrome-ui-annotation-ai-task-implementation-plan.md`
-- Project status: `docs/PROJECT_STATUS.md`
-- Agent instructions: `AGENTS.md`
+- Product requirements: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`
+- Authenticated single-project design: `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`
+- Implementation evidence: `docs/superpowers/plans/2026-07-16-single-project-session-key-implementation-plan.md`
+- Current factual status: `docs/PROJECT_STATUS.md`
