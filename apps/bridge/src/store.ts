@@ -123,7 +123,13 @@ async function ensureManagedDirectory(path: string): Promise<void> {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
       throw error;
     }
-    await mkdir(path);
+    try {
+      await mkdir(path);
+    } catch (mkdirError) {
+      if (!(mkdirError instanceof Error && "code" in mkdirError && mkdirError.code === "EEXIST")) {
+        throw mkdirError;
+      }
+    }
     stats = await lstat(path);
   }
 

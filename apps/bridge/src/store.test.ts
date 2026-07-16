@@ -45,6 +45,16 @@ const annotation = {
 } as const;
 
 describe("store", () => {
+  it("supports concurrent annotation directory initialization", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 50 }, () => ensureAnnotationDirs(projectPath))
+    );
+
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+  });
+
   it("rejects a symbolic-link annotation root", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "ui-annotations-project-"));
     const outsidePath = await mkdtemp(join(tmpdir(), "ui-annotations-outside-"));
