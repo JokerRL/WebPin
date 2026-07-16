@@ -1,6 +1,8 @@
 # Chrome UI Annotation and AI Task Package Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Archived historical plan:** This plan records the original 2026-07-01/02 implementation. Do not execute its obsolete allowed-roots environment variables, `projectPath` query parameters, request bodies, or permissive CORS examples. The current completed continuation is `docs/superpowers/plans/2026-07-16-single-project-session-key-implementation-plan.md`, governed by `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`.
+
+> **Historical execution note (inactive):** The original plan used checkbox steps and required a task-by-task agent workflow. That instruction is retained only as provenance; this archived plan must not be resumed.
 
 **Goal:** Build the MVP Chrome extension and Local File Bridge that capture UI annotations from web prototypes, persist them into `.ui-annotations/`, and generate structured AI task packages.
 

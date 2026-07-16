@@ -1,5 +1,7 @@
 # Chrome UI Annotation and AI Task Package PRD
 
+> **Supersession notice (2026-07-16):** This document remains the base product-scope PRD. Its bridge authentication and project-binding clauses are superseded by `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`. The current bridge owns one canonical project selected at startup with `UI_ANNOTATIONS_PROJECT_PATH`; the browser never supplies `projectPath`, and protected requests authenticate with `X-WebPin-Key`. `Origin` is CORS metadata only, not authorization.
+
 ## 1. Executive Summary
 
 - **Problem Statement**: When reviewing web product prototypes, UI change requests are often captured as loose notes, screenshots, or chat messages that lose element context, source context, and implementation intent. This makes later iOS implementation slower and error-prone because developers and AI agents must reconstruct what UI element was meant and what acceptance criteria apply.
@@ -42,8 +44,8 @@
 - **Story**: As a solo product builder, I want annotations saved into the project repository so that Codex and future engineering workflows can consume them.
   - **Acceptance Criteria**:
     - The Local File Bridge writes project files under `.ui-annotations/`.
-    - The extension can bind a browser origin or URL pattern to a local project path.
-    - Writes are limited to the selected project annotation directory unless explicitly configured otherwise.
+    - One bridge process owns one canonical project selected at startup; the extension cannot supply or switch its filesystem path.
+    - Writes are limited to the configured project's `.ui-annotations/` directory by default.
     - Local writes fail visibly with actionable errors when the bridge is unavailable.
 
 - **Story**: As a solo product builder, I want to generate AI task packages from annotations so that Codex can turn product feedback into implementation work.
@@ -67,8 +69,8 @@
 ### Tool Requirements
 
 - **Chrome Extension Runtime**: Content script, side panel or popup UI, background service worker, tab messaging, screenshot capture where allowed.
-- **Local Prototype Runtime**: For `file://` prototypes, the unpacked Chrome extension requires the user to enable Chrome's file URL access permission. Local file writes still go through the Local File Bridge and its explicit project-root allowlist.
-- **Local File Bridge**: Local service bound to `127.0.0.1`, responsible for project binding, file writes, screenshot and DOM snapshot persistence, and task package generation.
+- **Local Prototype Runtime**: For `file://` prototypes, the unpacked Chrome extension requires the user to enable Chrome's file URL access permission. Local file writes still go through the authenticated Local File Bridge for its canonical startup project.
+- **Local File Bridge**: Local service bound to `127.0.0.1`, responsible for canonical startup-project ownership, access-key authentication, file writes, screenshot persistence, and task package generation. DOM snapshot capture remains future work.
 - **Project Files**: `.ui-annotations/` directory as the durable interface between annotation capture and AI or engineering workflows.
 - **Future Codex/MCP Integration**:
   - Codex reads task package JSON/Markdown.
@@ -100,7 +102,8 @@ The MVP uses a three-layer architecture:
 
 2. **Local File Bridge**
    - Runs on localhost and exposes a narrow HTTP or WebSocket API.
-   - Binds browser URLs or origins to local project paths.
+   - Owns one canonical project configured at startup; browser URLs and origins cannot select filesystem paths.
+   - Requires the per-process `X-WebPin-Key` on protected routes; `Origin` is used only for CORS response metadata.
    - Writes annotations, assets, DOM snapshots, and task packages into `.ui-annotations/`.
    - Performs schema validation before file writes.
    - Does not execute arbitrary shell commands in MVP.
@@ -207,7 +210,7 @@ The MVP uses a three-layer architecture:
 
 ### Integration Points
 
-- **Browser to Bridge**: Local HTTP or WebSocket API with an explicit project binding handshake.
+- **Browser to Bridge**: Local HTTP API with a public health check and an access-key-authenticated session for the server-owned canonical project.
 - **File Prototype to Extension**: Content scripts may run on `file://` prototypes only when the user enables file URL access for the unpacked extension.
 - **Bridge to Project Files**: Schema-validated file writes under `.ui-annotations/`.
 - **Project Files to Codex**: Codex reads JSON/Markdown task packages as implementation context.
@@ -217,11 +220,11 @@ The MVP uses a three-layer architecture:
 ### Security & Privacy
 
 - Local File Bridge binds to `127.0.0.1` only.
-- The extension must require an explicit user action before connecting a website to a local project path.
+- The user explicitly starts the bridge for one project, copies its startup key, and connects the extension; the browser cannot select a local project path.
 - Bridge writes are restricted to `.ui-annotations/` by default.
 - Screenshots and DOM snapshots may include sensitive content; the MVP must provide a visible setting to disable screenshot capture per project.
 - No cloud upload occurs in MVP.
-- The bridge must reject requests from unbound origins.
+- Protected bridge routes must reject missing or incorrect access keys. Allowed origins affect CORS reflection only and do not grant authority.
 
 ## 5. Risks & Roadmap
 
@@ -255,8 +258,8 @@ The MVP uses a three-layer architecture:
 ### Technical Risks
 
 - **Anchor drift**: DOM selectors may break after page changes. Mitigation: store DOM, source, visual, text, and screenshot evidence together.
-- **File access complexity**: Chrome extensions cannot freely write repo files. Mitigation: use a narrow Local File Bridge with project binding.
-- **Security risk from localhost bridge**: A malicious page could attempt local requests. Mitigation: origin binding, local-only host, request tokens, and path restrictions.
+- **File access complexity**: Chrome extensions cannot freely write repo files. Mitigation: use a narrow Local File Bridge that owns one canonical startup project.
+- **Security risk from localhost bridge**: A malicious page could attempt local requests. Mitigation: local-only host, per-process access-key authentication, server-owned project selection, strict schemas, and managed-path restrictions.
 - **AI overreach**: Direct code edits can be wrong or unsafe. Mitigation: MVP outputs task packages only; code execution is a later gated capability.
 - **Web-to-iOS parity ambiguity**: Web DOM structure may not map cleanly to SwiftUI code. Mitigation: introduce source anchors now and a component mapping dictionary later.
 - **Sensitive capture**: Screenshots and DOM snapshots may contain private data. Mitigation: per-project screenshot controls and clear local-only storage defaults.

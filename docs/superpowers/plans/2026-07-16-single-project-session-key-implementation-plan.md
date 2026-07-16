@@ -1,5 +1,7 @@
 # Single-Project Session Key Implementation Record
 
+> **Completed archival record:** Implementation and verification finished on 2026-07-16. This file retains its `implementation-plan` filename for stable links; it records completed outcomes and residual follow-ups, not commands awaiting execution.
+
 **Goal:** Replace browser-supplied project paths and Origin-based authorization with one canonical bridge project plus a per-process access key, then prove the repaired annotation workflow in packaged Chromium.
 
 **Architecture:** The bridge resolves one project at startup and injects that trusted configuration into every route. A typed authenticated extension client owns bridge calls and drives explicit `offline`, `key-required`, and `ready` connection states. The background service worker serializes pending-list mutations. Store operations reject static symbolic links in managed directories, and Playwright loads the built MV3 extension to verify the real workflow.

@@ -4,8 +4,9 @@
 
 - Date: 2026-07-16
 - Phase: MVP stabilization
-- Primary product spec: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md`
-- Current security/workflow design: `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`
+- Base product requirements: `docs/superpowers/specs/2026-07-01-chrome-ui-annotation-ai-task-prd.md` (its legacy bridge binding/authentication clauses are superseded)
+- Active stabilization spec: `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`
+- Completed stabilization record: `docs/superpowers/plans/2026-07-16-single-project-session-key-implementation-plan.md`
 - Verification baseline: `CI=true pnpm verify` and `CI=true pnpm test:e2e:extension` passed on 2026-07-16.
 
 ## Current Architecture

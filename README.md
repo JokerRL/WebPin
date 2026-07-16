@@ -56,8 +56,10 @@ CI=true pnpm test:e2e:extension
 1. Build the extension:
 
    ```bash
-   CI=true pnpm --filter @ui-annotations/extension build
+   CI=true pnpm build
    ```
+
+   The root build compiles the shared package before building the extension and bridge, so this also works from a clean clone after dependency installation.
 
 2. Load `apps/extension/dist` as an unpacked extension in Chrome. For `file://` prototypes, enable **Allow access to file URLs** in the extension details.
 
@@ -77,6 +79,7 @@ CI=true pnpm test:e2e:extension
 9. Review pending annotations and click **Save all to files**. Each confirmed write is acknowledged individually; a failed remainder stays pending for retry.
 10. Use **Saved annotations** to refresh from disk, filter, change status, delete active annotations, and choose annotations for task generation.
 11. Use **Task package** to set a task ID, intent, acceptance criteria, prompt template, and suggested files, then generate the JSON, Markdown, and prompt files.
+12. Optionally click **Send to Codex**. The panel reports the final status and run ID; complete command output and execution metadata remain local in `.ui-annotations/runs/<run-id>.json`.
 
 Restarting the bridge generates a new access key. Paste the new key and reconnect; stale credentials are cleared without intentionally clearing pending annotations.
 
