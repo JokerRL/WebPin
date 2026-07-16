@@ -4,7 +4,7 @@
 
 **Goal:** Replace browser-supplied project paths and Origin-based authorization with one canonical bridge project plus a per-process access key, then prove the repaired annotation workflow in packaged Chromium.
 
-**Architecture:** The bridge resolves one project at startup and injects that trusted configuration into every route. A typed authenticated extension client owns bridge calls and drives explicit `offline`, `key-required`, and `ready` connection states. The background service worker serializes pending-list mutations. Store operations reject static symbolic links in managed directories, and Playwright loads the built MV3 extension to verify the real workflow.
+**Architecture:** The bridge resolves one project at startup, loads its stable opaque identity, and injects that trusted configuration into every route. A typed authenticated extension client owns bridge calls and drives explicit `offline`, `key-required`, and `ready` connection states. The background service worker serializes pending-list mutations. Store operations validate managed directories and final-file descriptors, and Playwright loads the built MV3 extension to verify the real workflow.
 
 **Tech stack:** TypeScript, Node.js HTTP and filesystem APIs, React 18, Chrome Manifest V3, Zod, Vitest, pnpm 9, Node.js 22, Playwright Chromium, and GitHub Actions.
 
@@ -35,7 +35,7 @@ Outcome: `Origin` is CORS metadata only, not authorization.
 - [x] Applied the helper in parent-before-child order to `.ui-annotations/`, `tasks/`, `runs/`, `assets/`, `screenshots/`, `crops/`, and `dom-snapshots/`.
 - [x] Retained narrow filename validation and containment checks for task, run, and asset writes.
 
-Outcome: static managed-tree symbolic links are rejected without claiming protection from a hostile concurrent parent-directory swap.
+Initial outcome: static managed-tree symbolic links were rejected. The post-completion hardening below extends this to final files and records the remaining hostile-swap boundary.
 
 ### Task 4: Single-project authenticated bridge routes
 
@@ -67,7 +67,7 @@ Outcome: confirmed writes stay removed, unconfirmed work stays pending, and ackn
 
 ### Task 7: Background ownership and panel migration
 
-- [x] Added annotation construction from the authenticated project name while preserving DOM and visual anchors.
+- [x] Added annotation construction from the authenticated stable project ID while preserving DOM and visual anchors.
 - [x] Removed browser project-path inference, selection, storage, request bodies, and query strings except for deliberate cleanup of the legacy storage key.
 - [x] Added `createPendingMutationQueue`; append and remove operations share one serialized promise chain, read current Chrome storage immediately before mutation, and keep the chain usable after a failed storage write.
 - [x] Routed panel pending acknowledgements and inline/background appends through that owner.
@@ -76,6 +76,26 @@ Outcome: confirmed writes stay removed, unconfirmed work stays pending, and ackn
 - [x] Updated English and Chinese connection copy.
 
 Outcome: the background service worker is the serialized pending-state owner. A narrow Chrome-storage compare/remove window remains if an independent actor bypasses that owner.
+
+### Post-completion final-review hardening
+
+- [x] Rejected symbolic links at every managed final file, not only managed directories.
+- [x] Opened managed final files with `O_NOFOLLOW` and `O_NONBLOCK` where supported, validated regular-file descriptors with `fstat`, and delayed overwrite truncation until after validation.
+- [x] Added POSIX FIFO rejection coverage for managed files.
+- [x] Added an opaque `projectId` to `project.json`, with deterministic SHA-256 canonical-path bootstrap so concurrent first startups converge and a persisted identity survives project moves.
+- [x] Preserved screenshot settings and unknown future metadata while bootstrapping or updating `project.json`.
+- [x] Expanded `/session` to return `ready`, `projectName`, and `projectId`; validated the response shape in the extension and propagated the exact ID into new annotations.
+- [x] Enforced `409 project_mismatch` before annotation and task writes on the server, in addition to the extension-side pending guard.
+- [x] Preserved legacy basename-derived pending entries but mismatch-blocked them until the user removes and recreates them.
+- [x] Extended the packaged MV3 workflow to assert stable project-ID propagation.
+
+Deviations resolved during final review:
+
+- Project identity is deterministic only for first bootstrap, not randomly regenerated. The access key remains cryptographically random per process.
+- E2E exercises the real built extension and server handler, but does not spawn the bridge CLI or scrape its printed access key. Focused configuration tests cover path validation, entrypoint metadata, and key generation.
+- On platforms without `O_NOFOLLOW`, final-component protection falls back to `lstat` followed by `open` and therefore retains a swap race. Hostile parent swaps and hard links are explicitly outside the personal-use threat model.
+
+Hardening commits: `058a4f0` (final-file symbolic links), `3bb1cc9` (FIFO handling), `03934f3` (stable identity propagation), and `312a026` (concurrent bootstrap and write enforcement).
 
 ### Task 8: Packaged-extension and CI verification
 
@@ -110,9 +130,10 @@ git diff --check
 Results:
 
 - Type checks passed for the shared, bridge, and extension packages.
-- 20 test files passed with 103 tests: shared 3, bridge 43, extension 57.
+- 129 unit/API tests passed: shared 3, bridge 63, extension 63.
 - Production builds passed for all three packages.
-- Packaged Chromium completed the authenticated annotation/task workflow with no browser console or page errors.
+- Packaged Chromium completed the authenticated annotation/task workflow, including stable project-ID propagation, with no browser console or page errors.
+- The packaged test used the real built extension and server handler; CLI startup/key-printing behavior remained covered by focused unit tests rather than E2E output scraping.
 - The documentation/CI diff passed whitespace validation.
 
 The CI equivalent uses:
@@ -136,7 +157,7 @@ with `CI=true` on both verification commands.
 
 ## Residual Risks and Follow-ups
 
-1. A hostile local process can still swap a parent directory after validation and before high-level Node filesystem I/O. Closing this time-of-check/time-of-use gap requires lower-level descriptor-relative operations or a different platform-specific boundary.
+1. On platforms without `O_NOFOLLOW`, the `lstat`-then-`open` fallback retains a final-component swap race. Hostile concurrent parent-directory swaps and hard-link attacks also remain outside the personal-use threat model.
 2. Chrome storage has no atomic compare-and-remove primitive. Serialization protects mutations routed through the background owner, but an independent actor that writes the same key outside that owner can still race it.
 3. Packaged-browser automation does not yet verify the screenshot `activeTab` grant or crop output.
 4. Task response paths use platform-native separators; Windows responses may contain backslashes.
@@ -148,4 +169,5 @@ with `CI=true` on both verification commands.
 
 - CI workflow: `ci: verify packaged extension workflow`
 - Documentation: `docs: document authenticated single-project workflow`
+- Final-review hardening: `058a4f0`, `3bb1cc9`, `03934f3`, and `312a026`
 - Push is intentionally left to the repository owner.

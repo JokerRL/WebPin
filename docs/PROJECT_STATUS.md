@@ -14,6 +14,7 @@
 - One Local File Bridge process owns one canonical project configured at startup with `UI_ANNOTATIONS_PROJECT_PATH`.
 - The bridge binds to `127.0.0.1`; startup resolves and validates the project before listening.
 - Browser requests never supply or switch the project path.
+- `.ui-annotations/project.json` stores an opaque stable project ID; the authenticated session exposes that ID and the display name, never the path.
 - `GET /health` and CORS preflight are public. Protected routes require the per-process key in `X-WebPin-Key`.
 - `Origin` controls CORS response metadata only and is not an authentication credential.
 - Durable project state remains under `.ui-annotations/`.
@@ -23,8 +24,9 @@
 
 Fresh local verification established the following:
 
-- Type checks, production builds, and 103 unit/API tests across 20 test files passed.
+- Type checks, production builds, and 129 unit/API tests passed: shared 3, bridge 63, and extension 63.
 - The packaged MV3 extension loaded in Chromium and authenticated with the startup key.
+- The authenticated session returned `ready`, `projectName`, and the exact stable `projectId`; the packaged flow asserted that ID propagated into the saved annotation.
 - The panel reached `Ready` only after a successful authenticated session.
 - Inline element selection created an annotation in the pending list.
 - Saving wrote `annotations.jsonl`; an authenticated `GET /annotations` reloaded it without a project-path query.
@@ -36,8 +38,10 @@ The implementation also has automated unit/API coverage for:
 
 - Required absolute, readable, writable canonical project configuration.
 - Timing-safe startup-key validation and non-sensitive session metadata.
+- Deterministic bootstrap project identity, concurrent-startup convergence, persistence across project moves, and preservation of screenshot settings and unknown `project.json` metadata.
 - Strict request schemas that reject obsolete browser `projectPath` input.
-- Static symbolic links in the managed annotation directory tree.
+- Stable-ID mismatch rejection before annotation or task writes, including legacy basename-derived pending entries.
+- Managed-directory symbolic-link rejection plus descriptor-level regular-file validation for every final managed read, append, and write; POSIX FIFOs are rejected.
 - Sequential save acknowledgement, partial failure, retry behavior, duplicate IDs, and refresh failure after acknowledgement.
 - Serialized concurrent pending-list mutations in the background owner and recovery after a failed Chrome storage write.
 - Browser-safe agent responses containing only `runId` and `status`, while full run records remain local.
@@ -47,6 +51,7 @@ The implementation also has automated unit/API coverage for:
 - MV3 extension shell, side panel, content overlay, keyboard command, and `file://` support when Chrome permission is enabled.
 - DOM element capture with selector, XPath, text excerpt, bounding box, page URL/route/title, and viewport metadata.
 - Inline annotation editing and pending annotation persistence.
+- Stable opaque project identity propagated from the authenticated session into new annotations and task-write guards.
 - Saved annotation search and filters, status updates, deletion, and append-only event traceability.
 - Task package generation as `.json`, `.md`, and `.prompt.md`.
 - Prompt templates for web, SwiftUI, cross-platform parity, UI QA, and planning work.
@@ -65,7 +70,8 @@ The implementation also has automated unit/API coverage for:
 
 ## Residual Risks and Follow-ups
 
-- Static managed-directory symbolic links are rejected, including links introduced before a write. A hostile local process that swaps a parent directory between validation and file I/O remains a time-of-check/time-of-use limitation of the current portable high-level Node filesystem approach. This is proportionate to the personal-use, same-machine MVP threat model, but it is not a claim of safety under adversarial concurrent filesystem mutation.
+- Managed directories reject symbolic links. Every final managed file read, append, and write validates an opened descriptor as a regular file; supported platforms also use `O_NOFOLLOW` and `O_NONBLOCK`, and overwrite paths truncate only after validation. POSIX FIFOs are rejected. Platforms without `O_NOFOLLOW` use an `lstat`-then-`open` fallback with a final-component swap race. Hostile parent-directory swaps and hard links remain outside the personal-use threat model.
+- Legacy pending annotations with basename-derived project IDs are preserved but mismatch-blocked. Users must remove and recreate them for the authenticated stable project; automatic migration would risk assigning work to the wrong project.
 - Pending mutations are serialized through the extension background owner. Chrome storage still offers no atomic compare-and-remove primitive, leaving a narrow window if another independent actor mutates the same key outside that owner.
 - Task response paths use Node's platform-native separator; Windows browser responses may contain backslashes. This is a minor portability cleanup.
 - Bridge tests cover representative authentication, schema, response-sanitization, and error cases. A table-driven every-route auth matrix, empty-patch policy assertions, and richer error-metadata assertions would improve coverage but are not current workflow blockers.

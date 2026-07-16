@@ -1,6 +1,6 @@
 # Chrome UI Annotation and AI Task Package PRD
 
-> **Supersession notice (2026-07-16):** This document remains the base product-scope PRD. Its bridge authentication and project-binding clauses are superseded by `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`. The current bridge owns one canonical project selected at startup with `UI_ANNOTATIONS_PROJECT_PATH`; the browser never supplies `projectPath`, and protected requests authenticate with `X-WebPin-Key`. `Origin` is CORS metadata only, not authorization.
+> **Supersession notice (2026-07-16):** This document remains the base product-scope PRD. Its bridge authentication, project binding and identity, and managed-file safety clauses are superseded by `docs/superpowers/specs/2026-07-16-single-project-session-key-design.md`. The current bridge owns one canonical project selected at startup with `UI_ANNOTATIONS_PROJECT_PATH`; the browser never supplies `projectPath`, and protected requests authenticate with `X-WebPin-Key`. `Origin` is CORS metadata only, not authorization. `.ui-annotations/project.json` holds an opaque stable project ID, while managed final-file I/O validates regular-file descriptors.
 
 ## 1. Executive Summary
 
@@ -146,7 +146,7 @@ The MVP uses a three-layer architecture:
 ```json
 {
   "id": "ann_001",
-  "projectId": "project_slug",
+  "projectId": "project_Cf3bU7V1KxQyD2nM8rT4Za",
   "page": {
     "url": "http://localhost:3000/settings",
     "route": "/settings",

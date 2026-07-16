@@ -15,6 +15,7 @@ The MVP uses a **Chrome Extension + Local File Bridge**:
 - The extension provides the element-selection overlay, inline editor, side panel, pending list, saved-annotation controls, and task-package controls.
 - The bridge binds to `127.0.0.1` and owns one canonical project chosen at process startup with `UI_ANNOTATIONS_PROJECT_PATH`.
 - The browser never sends or selects a filesystem path. Every protected request uses the startup access key in `X-WebPin-Key`.
+- The bridge exposes only the project's display name and opaque stable ID to the extension. It never exposes the canonical path.
 - `Origin` is used only for CORS response metadata; it is not authorization.
 - Project data is stored under the configured project's `.ui-annotations/` directory.
 - The bridge does not accept arbitrary shell commands. Its optional agent endpoint invokes only the fixed Codex runner for an existing generated task prompt.
@@ -73,7 +74,7 @@ CI=true pnpm test:e2e:extension
 
 4. Copy the access key printed by the bridge.
 5. Open the extension side panel, paste the key, and click **Connect**.
-6. Confirm the panel shows **Ready** and the configured project name. A public health response alone does not make the panel ready.
+6. Confirm the panel shows **Ready** and the configured project name. A public health response alone does not make the panel ready; the authenticated session also supplies the stable project ID used to bind pending work.
 7. Open the prototype page and click **Select element**, or use `Ctrl+Shift+Y` (`MacCtrl+Shift+Y` on macOS).
 8. Click an element, enter the note, change type, priority, and target platforms in the inline editor, then click **Save**. The annotation enters the pending list.
 9. Review pending annotations and click **Save all to files**. Each confirmed write is acknowledged individually; a failed remainder stays pending for retry.
@@ -82,6 +83,16 @@ CI=true pnpm test:e2e:extension
 12. Optionally click **Send to Codex**. The panel reports the final status and run ID; complete command output and execution metadata remain local in `.ui-annotations/runs/<run-id>.json`.
 
 Restarting the bridge generates a new access key. Paste the new key and reconnect; stale credentials are cleared without intentionally clearing pending annotations.
+
+The first startup stores an opaque `projectId` in `.ui-annotations/project.json`. If the file has no ID, the bridge derives a deterministic bootstrap ID from the canonical real path so concurrent startups converge on the same value. Once stored, the ID remains stable if the project directory moves. Existing screenshot settings and unknown future metadata in `project.json` are preserved when the bridge adds or updates managed fields.
+
+Pending annotations created by an older build may contain a legacy basename-derived ID. They remain visible, but the extension and bridge block them from being written into a project whose stable ID does not match. Remove and recreate those pending annotations after reconnecting; WebPin does not guess at or silently migrate their ownership.
+
+### Local file safety boundary
+
+WebPin rejects symbolic links in managed directories and validates every final managed file as a regular file before reading, appending, or writing it. On platforms that support them, file opens use `O_NOFOLLOW` and `O_NONBLOCK`; overwrite paths are truncated only after descriptor validation. This also rejects POSIX FIFOs.
+
+The portable fallback on platforms without `O_NOFOLLOW` uses `lstat` followed by `open`, which leaves a final-component swap race. Hostile concurrent parent-directory swaps and hard-link attacks remain outside the personal-use, same-machine MVP threat model.
 
 ### Optional screenshot and crop evidence
 

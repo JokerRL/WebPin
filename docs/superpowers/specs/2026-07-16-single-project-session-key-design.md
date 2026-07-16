@@ -21,7 +21,7 @@ The design:
 3. Removes project paths from browser API inputs.
 4. Authenticates protected requests with a per-process key.
 5. Distinguishes offline, key-required, and authenticated-ready states.
-6. Rejects static symbolic links in the managed annotation directory tree.
+6. Rejects symbolic links in the managed directory tree and validates every managed final file as a regular file.
 7. Preserves pending annotations through partial writes and authentication failures.
 8. Verifies the real built MV3 extension in Chromium.
 
@@ -37,9 +37,17 @@ The bridge requires this startup form:
 UI_ANNOTATIONS_PROJECT_PATH=/absolute/project/path pnpm dev:bridge
 ```
 
-Before listening, startup requires an absolute existing directory, resolves it with `realpath`, confirms it is a readable and writable directory, validates the managed annotation directories, and generates a random access key. The resolved path is injected into every store operation. The browser cannot provide, override, or switch it.
+Before listening, startup requires an absolute existing directory, resolves it with `realpath`, confirms it is a readable and writable directory, validates the managed annotation tree and project metadata, and generates a random access key. The resolved path is injected into every store operation. The browser cannot provide, override, or switch it.
 
 To work on another project, the user stops the bridge and starts a bridge process configured for that project.
+
+### Stable opaque project identity
+
+`.ui-annotations/project.json` stores an opaque `projectId` alongside `screenshotCaptureEnabled`. Reads and writes preserve unknown fields so future metadata is not discarded.
+
+When `projectId` is absent, startup derives `project_` plus 22 base64url characters from the SHA-256 digest of the canonical real path. This deterministic bootstrap makes concurrent bridge startups converge on the same identity instead of racing to persist different random values. After the ID is written, later startups reuse it, so moving the project does not change its identity. The bootstrap algorithm is not an access credential; only the per-process access key is random and secret.
+
+The browser receives the stable ID and display name, never the canonical path.
 
 ### Per-process startup access key
 
@@ -81,7 +89,8 @@ It does not establish an authenticated client session.
 ```json
 {
   "ready": true,
-  "projectName": "WebPin"
+  "projectName": "WebPin",
+  "projectId": "project_Cf3bU7V1KxQyD2nM8rT4Za"
 }
 ```
 
@@ -100,6 +109,8 @@ The canonical server-owned project is used by:
 - `POST /agent-runs`
 
 Request schemas are strict. A `projectPath` request field or query parameter is rejected instead of ignored.
+
+Annotation and task writes also require the submitted annotations to carry the authenticated session's exact `projectId`. The server returns `409 project_mismatch` before writing annotation or task files when any ID differs.
 
 The controlled agent request accepts only:
 
@@ -120,9 +131,11 @@ The browser receives only `{ "run": { "runId": "...", "status": "completed" } }`
 | `key-required` | The bridge is online but no valid key is active | Paste the printed key and connect |
 | `ready` | `/session` accepted the current key | Use protected annotation and task controls |
 
-The panel does not report `ready` based on `/health`. Latest-attempt gating prevents a stale connection attempt from overwriting newer connection state. A successful session stores the project name and removes the obsolete project-path storage key.
+The panel does not report `ready` based on `/health`. Latest-attempt gating prevents a stale connection attempt from overwriting newer connection state. A successful session validates and stores the project name and exact opaque project ID, then removes the obsolete project-path storage key.
 
-Pending annotations are associated with a project-derived ID. The panel blocks saving a pending batch when it belongs to a different authenticated project rather than silently writing it into the current project.
+New pending annotations use the exact stable ID from the authenticated session. The panel blocks saving a pending batch when it belongs to a different authenticated project rather than silently writing it into the current project, and the server independently enforces the same invariant before annotation and task writes.
+
+Legacy pending entries created by basename-derived builds remain in Chrome storage but fail the mismatch guard. The user must remove and recreate them after connecting to the intended project. WebPin deliberately avoids automatic migration because a basename is not sufficient proof of project ownership.
 
 ## Pending Save and Mutation Semantics
 
@@ -152,7 +165,11 @@ The server passes one canonical startup path to the store. Managed locations are
 
 Directory creation handles concurrent `EEXIST` races, then checks the resulting entry. Task, asset, and run filenames also use narrow validation and containment checks.
 
-This prevents a static symbolic-link layout from redirecting a managed write. It does not make file operations race-free under hostile concurrent local filesystem mutation: another process with access could swap a parent directory after validation but before the subsequent I/O. Closing that parent-directory time-of-check/time-of-use gap requires lower-level descriptor-relative operations or a different platform-specific storage boundary. The current protection is proportionate to WebPin's personal-use, same-user threat model and must not be described as safe against an adversarial concurrent filesystem actor.
+Every managed final file read, append, and write opens a descriptor and requires `fstat` to report a regular file. Where the platform supports them, opens include `O_NOFOLLOW` to reject final-component symbolic links and `O_NONBLOCK` so a POSIX FIFO cannot block the bridge; FIFOs are rejected by the regular-file check. Overwrite operations open without truncation, validate the descriptor, and truncate only afterward. This applies to `project.json`, annotation and event logs, task files, run records, prompts, and managed assets.
+
+On platforms without `O_NOFOLLOW`, the portable fallback performs `lstat` before `open`, leaving a race if a hostile process swaps the final component between those operations. Descriptor validation still rejects a resulting non-regular file. Hostile concurrent parent-directory swaps and hard-link attacks also remain outside WebPin's personal-use, same-user threat model.
+
+Project settings use the same file discipline and merge managed updates into the existing JSON object. Adding a bootstrap ID or changing screenshot capture therefore preserves unknown future metadata.
 
 ## Screenshot Boundary
 
@@ -173,9 +190,10 @@ git diff --check
 Evidence from the fresh run:
 
 - Type checks passed for the shared, bridge, and extension packages.
-- 20 test files passed with 103 unit/API tests: shared 3, bridge 43, extension 57.
+- 129 unit/API tests passed: shared 3, bridge 63, extension 63.
 - Shared, bridge, and extension production builds passed.
-- Packaged Chromium loaded the real MV3 extension and completed key authentication, inline selection, pending save, authenticated GET reload, status update, task JSON/Markdown/prompt generation, and delete/refresh.
+- Packaged Chromium loaded the real MV3 extension and completed key authentication, inline selection, stable-project-ID propagation, pending save, authenticated GET reload, status update, task JSON/Markdown/prompt generation, and delete/refresh.
+- The E2E uses the real built extension and server handler. It does not spawn the bridge CLI or read a printed startup key; focused configuration tests cover those entrypoint responsibilities.
 - The packaged run reported no browser console or page errors.
 
 GitHub Actions enforces the same outcomes on push and pull request with a fast `pnpm verify` job and a separate isolated Chromium job that installs the browser with system dependencies before running `pnpm test:e2e:extension`.
@@ -186,6 +204,9 @@ GitHub Actions enforces the same outcomes on push and pull request with a fast `
 2. Protected routes require the current startup key: implemented and covered by authentication/API tests.
 3. The packaged extension can load saved annotations after key entry: verified in Chromium.
 4. The panel reaches `ready` only after `/session`: implemented and covered by unit plus browser tests.
-5. Static managed-directory symbolic links are rejected: covered by store regressions, with the concurrent-swap residual documented above.
+5. Managed-directory symbolic links, final-file symbolic links, and POSIX FIFOs are rejected; final managed I/O validates regular-file descriptors before mutation.
 6. Offline/auth failures and partial saves preserve unacknowledged pending work without duplicating acknowledged writes: covered by pending-save, credential, and mutation tests.
-7. Type checks, unit/API tests, builds, and packaged Chromium verification pass: verified on 2026-07-16.
+7. Concurrent first startups converge on one deterministic bootstrap ID; the persisted ID survives project moves and settings writes preserve unknown metadata.
+8. `/session` returns the stable ID, new annotations use it exactly, and both extension and server mismatch guards block cross-project annotation/task writes.
+9. Legacy basename-derived pending work remains preserved but cannot be saved without explicit removal and recreation.
+10. Type checks, 129 unit/API tests, builds, and packaged Chromium verification pass: verified on 2026-07-16.
