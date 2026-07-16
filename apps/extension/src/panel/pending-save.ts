@@ -1,15 +1,14 @@
 import type { Annotation } from "@ui-annotations/shared";
 
 export async function savePendingSequentially(
-  annotations: Annotation[],
+  annotations: readonly Annotation[],
   save: (annotation: Annotation) => Promise<void>,
-  onRemainingChanged: (remaining: Annotation[]) => void
+  onRemainingChanged: (remaining: readonly Annotation[]) => void | Promise<void>
 ): Promise<void> {
-  let remaining = [...annotations];
+  const snapshot = [...annotations];
 
-  for (const annotation of annotations) {
+  for (const [index, annotation] of snapshot.entries()) {
     await save(annotation);
-    remaining = remaining.filter((candidate) => candidate.id !== annotation.id);
-    onRemainingChanged(remaining);
+    await onRemainingChanged(snapshot.slice(index + 1));
   }
 }
